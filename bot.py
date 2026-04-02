@@ -71,6 +71,7 @@ class CougConnectBot(commands.Bot):
     async def setup_hook(self):
         db.init_db()
         mp.load_tier_ids()
+        self.add_view(VerifyView())
         await self.tree.sync()
         log.info("Slash commands synced.")
         self.cleanup_tokens_task.start()
@@ -170,9 +171,6 @@ class VerifyView(discord.ui.View):
             color=discord.Color.blue(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-bot.add_view(VerifyView())
 
 
 # ── Slash commands ─────────────────────────────────────────────────────────────
