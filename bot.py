@@ -4,8 +4,9 @@ CougConnect Discord Membership Bot
 - Verifies Discord users against MemberPress subscriptions
 - Assigns roles: Gold, Silver, Insider, Unsubscribed
 - Exposes an aiohttp web server for:
-    POST /verify   — called by cougconnect.com after user logs in
-    POST /webhook  — MemberPress subscription status webhooks
+    GET  /verify-page  — serves the verification form to members
+    POST /verify-page  — processes email submission, assigns role
+    POST /webhook      — MemberPress subscription status webhooks
 """
 
 import asyncio
@@ -38,7 +39,6 @@ GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 VERIFY_CHANNEL_ID = int(os.getenv("DISCORD_VERIFY_CHANNEL_ID", "0"))
 PORT = int(os.getenv("PORT", "8080"))
 BOT_PUBLIC_URL = os.getenv("BOT_PUBLIC_URL", "http://localhost:8080")
-BOT_VERIFY_SECRET = os.getenv("BOT_VERIFY_SECRET", "")
 MP_WEBHOOK_SECRET = os.getenv("MEMBERPRESS_WEBHOOK_SECRET", "")
 
 ROLE_IDS = {
@@ -159,12 +159,12 @@ class VerifyView(discord.ui.View):
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         discord_id = str(interaction.user.id)
         token = db.create_token(discord_id)
-        url = f"{os.getenv('MEMBERPRESS_BASE_URL', 'https://cougconnect.com')}/discord-verify?token={token}&discord_id={discord_id}"
+        url = f"{BOT_PUBLIC_URL}/verify-page?token={token}&discord_id={discord_id}"
         embed = discord.Embed(
             title="Verify Your Membership",
             description=(
                 f"[Click here to verify your CougConnect subscription]({url})\n\n"
-                "You'll be asked to log in to your CougConnect account. "
+                "You'll enter your CougConnect email address to confirm your subscription. "
                 "This link expires in **15 minutes**."
             ),
             color=discord.Color.blue(),
@@ -329,47 +329,166 @@ async def stats(interaction: discord.Interaction):
 
 # ── aiohttp web server ─────────────────────────────────────────────────────────
 
-async def handle_verify(request: web.Request) -> web.Response:
+def _page(title: str, body: str) -> web.Response:
+    """Render a simple branded HTML page."""
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title} — CougConnect</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background: #0f1117;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+    }}
+    .card {{
+      background: #1a1d27;
+      border: 1px solid #2a2d3a;
+      border-radius: 16px;
+      padding: 48px 40px;
+      max-width: 480px;
+      width: 100%;
+      text-align: center;
+    }}
+    .logo {{ font-size: 14px; color: #6b7280; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 32px; }}
+    h1 {{ font-size: 24px; font-weight: 700; margin-bottom: 12px; }}
+    p {{ color: #9ca3af; font-size: 15px; line-height: 1.6; margin-bottom: 24px; }}
+    input[type=email] {{
+      width: 100%;
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 1px solid #374151;
+      background: #111827;
+      color: #fff;
+      font-size: 15px;
+      margin-bottom: 16px;
+      outline: none;
+    }}
+    input[type=email]:focus {{ border-color: #3b82f6; }}
+    button {{
+      width: 100%;
+      padding: 13px;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+    }}
+    button:hover {{ background: #1d4ed8; }}
+    .back {{ display: inline-block; margin-top: 24px; color: #6b7280; font-size: 13px; text-decoration: none; }}
+    .back:hover {{ color: #9ca3af; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">CougConnect</div>
+    {body}
+    <a href="https://cougconnect.com" class="back">← Back to CougConnect</a>
+  </div>
+</body>
+</html>"""
+    return web.Response(text=html, content_type="text/html")
+
+
+async def handle_verify_page_get(request: web.Request) -> web.Response:
+    """Serve the email entry form."""
+    token = request.rel_url.query.get("token", "")
+    discord_id = request.rel_url.query.get("discord_id", "")
+
+    if not token or not discord_id:
+        return _page("Error", """
+            <h1>❌ Invalid Link</h1>
+            <p>This verification link is invalid. Please click the button in Discord again.</p>
+        """)
+
+    form = f"""
+        <h1>🔐 Verify Membership</h1>
+        <p>Enter the email address associated with your CougConnect subscription.</p>
+        <form method="POST" action="/verify-page">
+          <input type="hidden" name="token" value="{token}">
+          <input type="hidden" name="discord_id" value="{discord_id}">
+          <input type="email" name="email" placeholder="your@email.com" required autofocus>
+          <button type="submit">Verify My Membership</button>
+        </form>
     """
-    Called by cougconnect.com after a user logs in and their MemberPress tier is known.
-    Expected JSON body:
-      { token, discord_id, tier, mp_member_id, mp_email, secret }
-    """
+    return _page("Verify Membership", form)
+
+
+async def handle_verify_page_post(request: web.Request) -> web.Response:
+    """Process the submitted email, look up MemberPress, assign role."""
     try:
-        data = await request.json()
+        data = await request.post()
     except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
+        return _page("Error", "<h1>❌ Bad Request</h1><p>Something went wrong. Please try again.</p>")
 
-    if data.get("secret") != BOT_VERIFY_SECRET:
-        return web.json_response({"error": "Unauthorized"}, status=403)
+    token = data.get("token", "")
+    discord_id = data.get("discord_id", "")
+    email = data.get("email", "").strip().lower()
 
-    token = data.get("token")
-    discord_id = data.get("discord_id")
-    tier = data.get("tier", "").lower()
-    mp_member_id = data.get("mp_member_id")
-    mp_email = data.get("mp_email", "")
+    if not all([token, discord_id, email]):
+        return _page("Error", "<h1>❌ Missing Info</h1><p>Please go back and fill in your email address.</p>")
 
-    if not all([token, discord_id, tier, mp_member_id]):
-        return web.json_response({"error": "Missing required fields"}, status=400)
-
-    if tier not in ("gold", "silver", "insider", "unsubscribed"):
-        return web.json_response({"error": f"Unknown tier: {tier}"}, status=400)
-
+    # Validate token
     stored_discord_id = db.consume_token(token)
     if not stored_discord_id:
-        return web.json_response({"error": "Invalid or expired token"}, status=400)
+        return _page("Link Expired", """
+            <h1>⏰ Link Expired</h1>
+            <p>This verification link has expired or already been used.</p>
+            <p>Click the <strong>Verify Membership</strong> button in Discord to get a new link.</p>
+        """)
     if stored_discord_id != discord_id:
-        return web.json_response({"error": "Token/Discord ID mismatch"}, status=400)
+        return _page("Error", "<h1>❌ Invalid Link</h1><p>This link is not valid for your account.</p>")
 
-    db.upsert_member(discord_id, mp_member_id, mp_email, tier)
+    # Look up member in MemberPress
+    mp_member = await mp.get_member_by_email(email)
+    if not mp_member:
+        return _page("Not Found", f"""
+            <h1>❌ Email Not Found</h1>
+            <p>No CougConnect account was found for <strong>{email}</strong>.</p>
+            <p>Make sure you're using the email you signed up with, or
+               <a href="https://cougconnect.com" style="color:#3b82f6;">visit CougConnect</a> to create an account.</p>
+        """)
 
+    mp_id = mp_member.get("id")
+    active_ids = await mp.get_active_membership_ids(mp_id)
+    tier = mp.resolve_tier(active_ids)
+
+    if tier == "unsubscribed":
+        return _page("No Active Subscription", f"""
+            <h1>⚠️ No Active Subscription</h1>
+            <p>The account for <strong>{email}</strong> doesn't have an active CougConnect membership.</p>
+            <p><a href="https://cougconnect.com/become-a-subscriber/" style="color:#3b82f6;">Subscribe here</a>
+               to get access.</p>
+        """)
+
+    db.upsert_member(discord_id, mp_id, email, tier)
     success = await assign_role(int(discord_id), tier)
-    if not success:
-        log.error(f"Failed to assign role for discord_id={discord_id}")
-        return web.json_response({"error": "Role assignment failed"}, status=500)
 
-    log.info(f"Verified discord_id={discord_id} as tier={tier}")
-    return web.json_response({"status": "ok", "tier": tier})
+    if not success:
+        log.error(f"Role assignment failed for discord_id={discord_id}")
+        return _page("Error", """
+            <h1>⚠️ Role Assignment Failed</h1>
+            <p>We verified your membership but couldn't assign your Discord role.
+               Please contact an admin in the Discord server.</p>
+        """)
+
+    log.info(f"Verified discord_id={discord_id} email={email} tier={tier}")
+    tier_display = tier_label(tier)
+    return _page("Verified!", f"""
+        <h1>✅ You're Verified!</h1>
+        <p>Your <strong>{tier_display}</strong> membership has been confirmed.</p>
+        <p>Head back to Discord — your <strong>{tier_display}</strong> role has been assigned. You're all set!</p>
+    """)
 
 
 async def handle_webhook(request: web.Request) -> web.Response:
@@ -448,7 +567,8 @@ async def handle_webhook(request: web.Request) -> web.Response:
 
 async def start_web_server():
     app = web.Application()
-    app.router.add_post("/verify", handle_verify)
+    app.router.add_get("/verify-page", handle_verify_page_get)
+    app.router.add_post("/verify-page", handle_verify_page_post)
     app.router.add_post("/webhook", handle_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
