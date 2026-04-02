@@ -84,10 +84,11 @@ class CougConnectBot(commands.Bot):
         channel = self.get_channel(VERIFY_CHANNEL_ID)
         if not channel:
             return
-        # Only post if no recent bot message with the button exists
-        async for msg in channel.history(limit=10):
+        # Delete any old bot verify embeds and repost fresh
+        async for msg in channel.history(limit=20):
             if msg.author == self.user and msg.components:
-                return  # already posted
+                await msg.delete()
+                break
         embed = discord.Embed(
             title="🔐 Verify Your CougConnect Membership",
             description=(
@@ -158,21 +159,28 @@ class VerifyView(discord.ui.View):
 
     @discord.ui.button(label="Verify Membership", style=discord.ButtonStyle.primary, emoji="🔐", custom_id="verify_membership")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        discord_id = str(interaction.user.id)
-        token = db.create_token(discord_id)
-        url = f"{BOT_PUBLIC_URL}/verify-page?token={token}&discord_id={discord_id}"
-        embed = discord.Embed(
-            title="Verify Your Membership",
-            description=(
-                "Click the button below to verify your CougConnect subscription.\n\n"
-                "You'll enter your CougConnect email address to confirm your subscription. "
-                "This link expires in **15 minutes**."
-            ),
-            color=discord.Color.blue(),
-        )
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Verify My Membership", url=url, style=discord.ButtonStyle.link, emoji="🔗"))
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        try:
+            discord_id = str(interaction.user.id)
+            token = db.create_token(discord_id)
+            url = f"{BOT_PUBLIC_URL}/verify-page?token={token}&discord_id={discord_id}"
+            embed = discord.Embed(
+                title="Verify Your Membership",
+                description=(
+                    "Click the button below to verify your CougConnect subscription.\n\n"
+                    "You'll enter your CougConnect email address to confirm your subscription. "
+                    "This link expires in **15 minutes**."
+                ),
+                color=discord.Color.blue(),
+            )
+            view = discord.ui.View()
+            view.add_item(discord.ui.Button(label="Verify My Membership", url=url, style=discord.ButtonStyle.link, emoji="🔗"))
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            log.error(f"Error in verify_button: {e}")
+            try:
+                await interaction.response.send_message("Something went wrong. Please try again in a moment.", ephemeral=True)
+            except Exception:
+                pass
 
 
 # ── Slash commands ─────────────────────────────────────────────────────────────
