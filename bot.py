@@ -164,13 +164,15 @@ class VerifyView(discord.ui.View):
         embed = discord.Embed(
             title="Verify Your Membership",
             description=(
-                f"[Click here to verify your CougConnect subscription]({url})\n\n"
+                "Click the button below to verify your CougConnect subscription.\n\n"
                 "You'll enter your CougConnect email address to confirm your subscription. "
                 "This link expires in **15 minutes**."
             ),
             color=discord.Color.blue(),
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Verify My Membership", url=url, style=discord.ButtonStyle.link, emoji="🔗"))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ── Slash commands ─────────────────────────────────────────────────────────────
