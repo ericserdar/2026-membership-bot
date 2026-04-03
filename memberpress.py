@@ -12,7 +12,6 @@ from datetime import datetime
 
 MP_BASE = os.getenv("MEMBERPRESS_BASE_URL", "").rstrip("/")
 MP_KEY = os.getenv("MEMBERPRESS_API_KEY", "")
-MP_USER = os.getenv("MEMBERPRESS_API_USERNAME", "admin")
 
 # Tier ID sets — populated from env at startup
 _GOLD_IDS: set[int] = set()
@@ -27,10 +26,6 @@ def load_tier_ids():
     _GOLD_IDS = parse("MEMBERPRESS_TIER_GOLD_IDS")
     _SILVER_IDS = parse("MEMBERPRESS_TIER_SILVER_IDS")
     _INSIDER_IDS = parse("MEMBERPRESS_TIER_INSIDER_IDS")
-
-
-def _auth() -> aiohttp.BasicAuth:
-    return aiohttp.BasicAuth(MP_USER, MP_KEY)
 
 
 def _api(path: str) -> str:
@@ -56,8 +51,7 @@ async def get_member_by_email(email: str) -> dict | None:
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api("members"),
-            auth=_auth(),
-            params={"search": email, "per_page": 5},
+            params={"search": email, "per_page": 5, "apikey": MP_KEY},
         ) as resp:
             log.info(f"MemberPress API /members status={resp.status} for email={email}")
             if resp.status != 200:
@@ -76,7 +70,7 @@ async def get_member_by_id(mp_member_id: int) -> dict | None:
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api(f"members/{mp_member_id}"),
-            auth=_auth(),
+            params={"apikey": MP_KEY},
         ) as resp:
             if resp.status != 200:
                 return None
@@ -88,7 +82,7 @@ async def get_active_membership_ids(mp_member_id: int) -> list[int]:
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api(f"members/{mp_member_id}/subscriptions"),
-            auth=_auth(),
+            params={"apikey": MP_KEY},
         ) as resp:
             if resp.status != 200:
                 return []
