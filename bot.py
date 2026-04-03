@@ -75,6 +75,7 @@ class CougConnectBot(commands.Bot):
         await self.tree.sync()
         log.info("Slash commands synced.")
         self.cleanup_tokens_task.start()
+        self.sync_all_members_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -103,6 +104,41 @@ class CougConnectBot(commands.Bot):
     @tasks.loop(hours=1)
     async def cleanup_tokens_task(self):
         db.cleanup_expired_tokens()
+
+    @tasks.loop(hours=24)
+    async def sync_all_members_task(self):
+        members = db.get_all_members()
+        if not members:
+            return
+        log.info(f"Starting periodic sync for {len(members)} linked members...")
+        changed = 0
+        for record in members:
+            try:
+                active_ids = await mp.get_active_membership_ids(record["mp_member_id"])
+                new_tier = mp.resolve_tier(active_ids)
+                if new_tier != record["tier"]:
+                    log.info(f"Sync: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
+                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                    await assign_role(int(record["discord_id"]), new_tier)
+                    if new_tier == "unsubscribed" and record["tier"] != "unsubscribed":
+                        try:
+                            user = await self.fetch_user(int(record["discord_id"]))
+                            await user.send(
+                                "Your CougConnect membership has expired. "
+                                "Renew at https://cougconnect.com to restore your access. 🏈"
+                            )
+                        except Exception:
+                            pass
+                    changed += 1
+                else:
+                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+            except Exception as e:
+                log.error(f"Sync error for discord_id={record['discord_id']}: {e}")
+        log.info(f"Periodic sync complete. {changed} role(s) updated out of {len(members)} members.")
+
+    @sync_all_members_task.before_loop
+    async def before_sync(self):
+        await self.wait_until_ready()
 
 
 bot = CougConnectBot()
@@ -353,6 +389,33 @@ async def faq(interaction: discord.Interaction, number: int | None = None):
         embed.add_field(name=f"{i}. {item['q']}", value=item["a"], inline=False)
     embed.set_footer(text="Use /faq <number> to view a specific answer")
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="sync-all", description="Manually trigger a full membership sync against MemberPress")
+@app_commands.default_permissions(administrator=True)
+async def sync_all(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    members = db.get_all_members()
+    if not members:
+        await interaction.followup.send("No linked members to sync.", ephemeral=True)
+        return
+    changed = 0
+    for record in members:
+        try:
+            active_ids = await mp.get_active_membership_ids(record["mp_member_id"])
+            new_tier = mp.resolve_tier(active_ids)
+            if new_tier != record["tier"]:
+                db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                await assign_role(int(record["discord_id"]), new_tier)
+                changed += 1
+            else:
+                db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+        except Exception as e:
+            log.error(f"sync-all error for discord_id={record['discord_id']}: {e}")
+    await interaction.followup.send(
+        f"✅ Sync complete — checked **{len(members)}** members, updated **{changed}** role(s).",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="stats", description="Membership stats breakdown")

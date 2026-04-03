@@ -130,6 +130,15 @@ def remove_member(discord_id: str):
         conn.commit()
 
 
+def get_all_members() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced "
+            "FROM member_links"
+        ).fetchall()
+    return [dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row)) for row in rows]
+
+
 def get_stats() -> dict:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
