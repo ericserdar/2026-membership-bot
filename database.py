@@ -99,6 +99,18 @@ def get_member_by_discord(discord_id: str) -> dict | None:
     return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row))
 
 
+def get_member_by_email(email: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced "
+            "FROM member_links WHERE LOWER(mp_email) = LOWER(?)",
+            (email,),
+        ).fetchone()
+    if not row:
+        return None
+    return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row))
+
+
 def get_member_by_mp_id(mp_member_id: int) -> dict | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(

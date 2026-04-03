@@ -161,6 +161,19 @@ class VerifyView(discord.ui.View):
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             discord_id = str(interaction.user.id)
+            existing = db.get_member_by_discord(discord_id)
+            if existing:
+                embed = discord.Embed(
+                    title="Already Verified",
+                    description=(
+                        f"Your account is already linked to `{existing['mp_email']}` "
+                        f"with the **{tier_label(existing['tier'])}** role.\n\n"
+                        "If you need to update your membership, contact an admin."
+                    ),
+                    color=tier_color(existing["tier"]),
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
             token = db.create_token(discord_id)
             url = f"{BOT_PUBLIC_URL}/verify-page?token={token}&discord_id={discord_id}"
             embed = discord.Embed(
@@ -456,6 +469,15 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
         """)
     if stored_discord_id != discord_id:
         return _page("Error", "<h1>❌ Invalid Link</h1><p>This link is not valid for your account.</p>")
+
+    # Check if email is already linked to a different Discord account
+    existing_link = db.get_member_by_email(email)
+    if existing_link and existing_link["discord_id"] != discord_id:
+        return _page("Already Linked", f"""
+            <h1>⚠️ Email Already Linked</h1>
+            <p><strong>{email}</strong> is already connected to a different Discord account.</p>
+            <p>If this is a mistake, please contact an admin in the Discord server.</p>
+        """)
 
     # Look up member in MemberPress
     mp_member = await mp.get_member_by_email(email)
