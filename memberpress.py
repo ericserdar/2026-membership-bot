@@ -51,7 +51,8 @@ async def get_member_by_email(email: str) -> dict | None:
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api("members"),
-            params={"search": email, "per_page": 5, "apikey": MP_KEY},
+            headers={"MEMBERPRESS-API-KEY": MP_KEY},
+            params={"search": email, "per_page": 5},
         ) as resp:
             log.info(f"MemberPress API /members status={resp.status} for email={email}")
             if resp.status != 200:
@@ -59,7 +60,7 @@ async def get_member_by_email(email: str) -> dict | None:
                 log.error(f"MemberPress API error: {body}")
                 return None
             data = await resp.json()
-            log.info(f"MemberPress returned {len(data)} result(s)")
+            log.info(f"MemberPress returned {len(data)} result(s): {[m.get('email') for m in data]}")
     for member in data:
         if member.get("email", "").lower() == email.lower():
             return member
@@ -70,7 +71,7 @@ async def get_member_by_id(mp_member_id: int) -> dict | None:
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api(f"members/{mp_member_id}"),
-            params={"apikey": MP_KEY},
+            headers={"MEMBERPRESS-API-KEY": MP_KEY},
         ) as resp:
             if resp.status != 200:
                 return None
@@ -82,7 +83,7 @@ async def get_active_membership_ids(mp_member_id: int) -> list[int]:
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api(f"members/{mp_member_id}/subscriptions"),
-            params={"apikey": MP_KEY},
+            headers={"MEMBERPRESS-API-KEY": MP_KEY},
         ) as resp:
             if resp.status != 200:
                 return []
