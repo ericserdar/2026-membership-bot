@@ -80,21 +80,47 @@ async def get_member_by_id(mp_member_id: int) -> dict | None:
 
 async def get_active_membership_ids(mp_member_id: int) -> list[int]:
     """Return list of membership IDs the member currently has active."""
+    import logging
+    log = logging.getLogger("cougconnect")
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api(f"members/{mp_member_id}/subscriptions"),
             headers={"MEMBERPRESS-API-KEY": MP_KEY},
         ) as resp:
+            log.info(f"Subscriptions endpoint status={resp.status} for mp_member_id={mp_member_id}")
             if resp.status != 200:
-                return []
+                body = await resp.text()
+                log.error(f"Subscriptions error: {body}")
+                # Fall back to member object active_memberships
+                return await _get_active_ids_from_member(mp_member_id)
             subs = await resp.json()
+            log.info(f"Raw subscriptions: {subs}")
     active = []
     for sub in subs:
-        if sub.get("status") == "active":
-            mid = sub.get("membership", {}).get("id")
-            if mid:
-                active.append(int(mid))
+        status = sub.get("status")
+        mid = sub.get("membership", {}).get("id") or sub.get("membership_id")
+        log.info(f"  sub status={status} membership_id={mid}")
+        if status == "active" and mid:
+            active.append(int(mid))
+    log.info(f"Active membership IDs: {active} | Configured gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
     return active
+
+
+async def _get_active_ids_from_member(mp_member_id: int) -> list[int]:
+    """Fallback: read active_memberships from the member object itself."""
+    import logging
+    log = logging.getLogger("cougconnect")
+    member = await get_member_by_id(mp_member_id)
+    if not member:
+        return []
+    active_memberships = member.get("active_memberships", [])
+    log.info(f"Fallback active_memberships from member object: {active_memberships}")
+    ids = []
+    for m in active_memberships:
+        mid = m.get("id") if isinstance(m, dict) else m
+        if mid:
+            ids.append(int(mid))
+    return ids
 
 
 def parse_subscription_status(member_data: dict) -> dict:
