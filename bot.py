@@ -260,6 +260,27 @@ async def sync_member(interaction: discord.Interaction, user: discord.Member):
     )
 
 
+@bot.tree.command(name="lookup-email", description="Find which Discord account is linked to an email address")
+@app_commands.describe(email="The CougConnect email to look up")
+@app_commands.default_permissions(manage_roles=True)
+async def lookup_email(interaction: discord.Interaction, email: str):
+    record = db.get_member_by_email(email.strip().lower())
+    if not record:
+        await interaction.response.send_message(f"❌ No Discord account is linked to `{email}`.", ephemeral=True)
+        return
+    try:
+        user = await bot.fetch_user(int(record["discord_id"]))
+        user_display = f"{user.mention} (`{user.name}` — ID: `{record['discord_id']}`)"
+    except Exception:
+        user_display = f"Unknown user (ID: `{record['discord_id']}`)"
+    embed = discord.Embed(title="Email Lookup", color=tier_color(record["tier"]))
+    embed.add_field(name="Email", value=record["mp_email"], inline=False)
+    embed.add_field(name="Discord Account", value=user_display, inline=False)
+    embed.add_field(name="Tier", value=tier_label(record["tier"]), inline=True)
+    embed.add_field(name="Linked On", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="get-info", description="Show the email address tied to a Discord user")
 @app_commands.describe(user="Discord member to look up")
 @app_commands.default_permissions(manage_roles=True)
