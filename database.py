@@ -1,8 +1,9 @@
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
 
-DB_PATH = "cougconnect.db"
+DB_PATH = os.environ.get("DB_PATH", "/data/cougconnect.db")
 
 
 def init_db():
