@@ -12,6 +12,7 @@ from datetime import datetime
 
 MP_BASE = os.getenv("MEMBERPRESS_BASE_URL", "").rstrip("/")
 MP_KEY = os.getenv("MEMBERPRESS_API_KEY", "")
+MP_USER = os.getenv("MEMBERPRESS_API_USERNAME", "admin")
 
 # Tier ID sets — populated from env at startup
 _GOLD_IDS: set[int] = set()
@@ -29,7 +30,7 @@ def load_tier_ids():
 
 
 def _auth() -> aiohttp.BasicAuth:
-    return aiohttp.BasicAuth("api", MP_KEY)
+    return aiohttp.BasicAuth(MP_USER, MP_KEY)
 
 
 def _api(path: str) -> str:
@@ -50,16 +51,21 @@ def resolve_tier(membership_ids: list[int]) -> str:
 
 async def get_member_by_email(email: str) -> dict | None:
     """Return the first MemberPress member matching the email, or None."""
+    import logging
+    log = logging.getLogger("cougconnect")
     async with aiohttp.ClientSession() as session:
         async with session.get(
             _api("members"),
             auth=_auth(),
             params={"search": email, "per_page": 5},
         ) as resp:
+            log.info(f"MemberPress API /members status={resp.status} for email={email}")
             if resp.status != 200:
+                body = await resp.text()
+                log.error(f"MemberPress API error: {body}")
                 return None
             data = await resp.json()
-    # data is a list of member objects
+            log.info(f"MemberPress returned {len(data)} result(s)")
     for member in data:
         if member.get("email", "").lower() == email.lower():
             return member
