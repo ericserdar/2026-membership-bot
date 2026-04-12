@@ -679,11 +679,33 @@ async def handle_webhook(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_admin_import(request: web.Request) -> web.Response:
+    """Temporary endpoint to bulk-import member records from the migration script."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if data.get("secret") != BOT_VERIFY_SECRET:
+        return web.json_response({"error": "Unauthorized"}, status=403)
+    members = data.get("members", [])
+    imported = 0
+    skipped = 0
+    for m in members:
+        if db.get_member_by_discord(m["discord_id"]):
+            skipped += 1
+            continue
+        db.upsert_member(m["discord_id"], m["mp_member_id"], m["mp_email"], m["tier"])
+        imported += 1
+    log.info(f"Admin import: {imported} imported, {skipped} skipped")
+    return web.json_response({"imported": imported, "skipped": skipped})
+
+
 async def start_web_server():
-    app = web.Application()
+    app = web.Application(client_max_size=50*1024*1024)
     app.router.add_get("/verify-page", handle_verify_page_get)
     app.router.add_post("/verify-page", handle_verify_page_post)
     app.router.add_post("/webhook", handle_webhook)
+    app.router.add_post("/admin/import", handle_admin_import)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
