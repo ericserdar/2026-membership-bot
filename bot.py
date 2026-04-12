@@ -40,6 +40,7 @@ VERIFY_CHANNEL_ID = int(os.getenv("DISCORD_VERIFY_CHANNEL_ID", "0"))
 PORT = int(os.getenv("PORT", "8080"))
 BOT_PUBLIC_URL = os.getenv("BOT_PUBLIC_URL", "http://localhost:8080")
 MP_WEBHOOK_SECRET = os.getenv("MEMBERPRESS_WEBHOOK_SECRET", "")
+BOT_VERIFY_SECRET = os.getenv("BOT_VERIFY_SECRET", "")
 
 ROLE_IDS = {
     "gold":         int(os.getenv("DISCORD_ROLE_GOLD_ID", "0")),
