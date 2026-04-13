@@ -248,7 +248,9 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
         return
 
     mp_id = mp_member.get("id")
-    active_ids = await mp.get_active_membership_ids(mp_id)
+    active_ids = mp.active_ids_from_member_object(mp_member)
+    if not active_ids:
+        active_ids = await mp.get_active_membership_ids(mp_id)
     tier = mp.resolve_tier(active_ids)
 
     db.upsert_member(str(user.id), mp_id, email, tier)
@@ -578,7 +580,9 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
         """)
 
     mp_id = mp_member.get("id")
-    active_ids = await mp.get_active_membership_ids(mp_id)
+    active_ids = mp.active_ids_from_member_object(mp_member)
+    if not active_ids:
+        active_ids = await mp.get_active_membership_ids(mp_id)
     tier = mp.resolve_tier(active_ids)
 
     if tier == "unsubscribed":

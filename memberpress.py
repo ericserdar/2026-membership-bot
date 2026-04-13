@@ -111,6 +111,20 @@ async def get_active_membership_ids(mp_member_id: int) -> list[int]:
     return active
 
 
+def active_ids_from_member_object(member: dict) -> list[int]:
+    """Extract active membership IDs from an already-fetched member object."""
+    import logging
+    log = logging.getLogger("cougconnect")
+    active_memberships = member.get("active_memberships", [])
+    log.info(f"active_memberships from member object: {active_memberships}")
+    ids = []
+    for m in active_memberships:
+        mid = m.get("id") if isinstance(m, dict) else m
+        if mid:
+            ids.append(int(mid))
+    return ids
+
+
 async def _get_active_ids_from_member(mp_member_id: int) -> list[int]:
     """Fallback: read active_memberships from the member object itself."""
     import logging
@@ -119,14 +133,7 @@ async def _get_active_ids_from_member(mp_member_id: int) -> list[int]:
     if not member:
         log.warning(f"Fallback: get_member_by_id({mp_member_id}) returned None (rate-limited or not found)")
         return []
-    active_memberships = member.get("active_memberships", [])
-    log.info(f"Fallback active_memberships from member object: {active_memberships}")
-    ids = []
-    for m in active_memberships:
-        mid = m.get("id") if isinstance(m, dict) else m
-        if mid:
-            ids.append(int(mid))
-    return ids
+    return active_ids_from_member_object(member)
 
 
 def parse_subscription_status(member_data: dict) -> dict:
