@@ -15,7 +15,8 @@ import hmac
 import json
 import logging
 import os
-from datetime import datetime
+import datetime
+from datetime import datetime as dt
 
 import aiohttp
 import aiohttp.web as web
@@ -106,7 +107,7 @@ class CougConnectBot(commands.Bot):
     async def cleanup_tokens_task(self):
         db.cleanup_expired_tokens()
 
-    @tasks.loop(hours=24)
+    @tasks.loop(time=datetime.time(hour=3, minute=0, tzinfo=datetime.timezone.utc))
     async def sync_all_members_task(self):
         members = db.get_all_members()
         if not members:
@@ -135,13 +136,12 @@ class CougConnectBot(commands.Bot):
                     db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
             except Exception as e:
                 log.error(f"Sync error for discord_id={record['discord_id']}: {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(5)
         log.info(f"Periodic sync complete. {changed} role(s) updated out of {len(members)} members.")
 
     @sync_all_members_task.before_loop
     async def before_sync(self):
         await self.wait_until_ready()
-        await asyncio.sleep(3600)  # Wait 1 hour after startup before first sync
 
 
 bot = CougConnectBot()
@@ -434,7 +434,7 @@ async def stats(interaction: discord.Interaction):
     embed.add_field(name="🥈 Silver", value=str(s["silver"]), inline=True)
     embed.add_field(name="🔵 Insider", value=str(s["insider"]), inline=True)
     embed.add_field(name="❌ Unsubscribed", value=str(s["unsubscribed"]), inline=True)
-    embed.set_footer(text=f"As of {datetime.utcnow().strftime('%m/%d/%Y %H:%M')} UTC")
+    embed.set_footer(text=f"As of {dt.utcnow().strftime('%m/%d/%Y %H:%M')} UTC")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
