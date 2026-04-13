@@ -102,13 +102,13 @@ async def get_active_membership_ids(mp_member_id: int) -> list[int]:
         log.info(f"  sub status={status} membership_id={mid}")
         if status in ("active", "complete") and mid:
             active.append(int(mid))
-    log.info(f"Active membership IDs: {active} | Configured gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
-    # If subscriptions endpoint returned data but no active subs found, fall back to
-    # the member object's active_memberships field — this covers cancelled-but-not-yet-expired members.
-    if not active:
-        log.info(f"No active subs found via subscriptions endpoint, falling back to member object for mp_member_id={mp_member_id}")
-        active = await _get_active_ids_from_member(mp_member_id)
-    return active
+    # Also check active_memberships from the member object and merge — this catches:
+    # - Cancelled-but-not-expired subs (status "stopped" in subscriptions but still in active_memberships)
+    # - Members with multiple tiers where some subs have non-active statuses
+    fallback_ids = await _get_active_ids_from_member(mp_member_id)
+    merged = list(set(active) | set(fallback_ids))
+    log.info(f"Merged membership IDs: {merged} (subscriptions={active}, member_object={fallback_ids}) | gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
+    return merged
 
 
 def active_ids_from_member_object(member: dict) -> list[int]:
