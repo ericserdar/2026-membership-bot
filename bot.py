@@ -107,7 +107,7 @@ class CougConnectBot(commands.Bot):
     async def cleanup_tokens_task(self):
         db.cleanup_expired_tokens()
 
-    @tasks.loop(time=datetime.time(hour=3, minute=0, tzinfo=datetime.timezone.utc))
+    @tasks.loop(time=datetime.time(hour=10, minute=0, tzinfo=datetime.timezone.utc))  # 3am MST (UTC-7)
     async def sync_all_members_task(self):
         members = db.get_all_members()
         if not members:
