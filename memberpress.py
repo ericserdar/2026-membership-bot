@@ -100,7 +100,7 @@ async def get_active_membership_ids(mp_member_id: int) -> list[int]:
         status = sub.get("status")
         mid = sub.get("membership", {}).get("id") or sub.get("membership_id")
         log.info(f"  sub status={status} membership_id={mid}")
-        if status == "active" and mid:
+        if status in ("active", "complete") and mid:
             active.append(int(mid))
     log.info(f"Active membership IDs: {active} | Configured gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
     return active
