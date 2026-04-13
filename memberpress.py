@@ -112,6 +112,7 @@ async def _get_active_ids_from_member(mp_member_id: int) -> list[int]:
     log = logging.getLogger("cougconnect")
     member = await get_member_by_id(mp_member_id)
     if not member:
+        log.warning(f"Fallback: get_member_by_id({mp_member_id}) returned None (rate-limited or not found)")
         return []
     active_memberships = member.get("active_memberships", [])
     log.info(f"Fallback active_memberships from member object: {active_memberships}")

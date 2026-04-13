@@ -135,6 +135,7 @@ class CougConnectBot(commands.Bot):
                     db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
             except Exception as e:
                 log.error(f"Sync error for discord_id={record['discord_id']}: {e}")
+            await asyncio.sleep(0.5)
         log.info(f"Periodic sync complete. {changed} role(s) updated out of {len(members)} members.")
 
     @sync_all_members_task.before_loop
@@ -413,6 +414,7 @@ async def sync_all(interaction: discord.Interaction):
                 db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
         except Exception as e:
             log.error(f"sync-all error for discord_id={record['discord_id']}: {e}")
+        await asyncio.sleep(0.5)
     await interaction.followup.send(
         f"✅ Sync complete — checked **{len(members)}** members, updated **{changed}** role(s).",
         ephemeral=True,
