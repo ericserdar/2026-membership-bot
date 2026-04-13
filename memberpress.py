@@ -103,6 +103,11 @@ async def get_active_membership_ids(mp_member_id: int) -> list[int]:
         if status in ("active", "complete") and mid:
             active.append(int(mid))
     log.info(f"Active membership IDs: {active} | Configured gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
+    # If subscriptions endpoint returned data but no active subs found, fall back to
+    # the member object's active_memberships field — this covers cancelled-but-not-yet-expired members.
+    if not active:
+        log.info(f"No active subs found via subscriptions endpoint, falling back to member object for mp_member_id={mp_member_id}")
+        active = await _get_active_ids_from_member(mp_member_id)
     return active
 
 
