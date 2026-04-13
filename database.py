@@ -26,6 +26,17 @@ def init_db():
                 used        INTEGER DEFAULT 0
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tier_changes (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id   TEXT,
+                mp_email     TEXT,
+                old_tier     TEXT,
+                new_tier     TEXT,
+                changed_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reason       TEXT
+            )
+        """)
         conn.commit()
 
 
@@ -72,6 +83,25 @@ def cleanup_expired_tokens():
 
 
 # ── Member links ──────────────────────────────────────────────────────────────
+
+def log_tier_change(discord_id: str, mp_email: str, old_tier: str, new_tier: str, reason: str = "sync"):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO tier_changes (discord_id, mp_email, old_tier, new_tier, reason) VALUES (?, ?, ?, ?, ?)",
+            (discord_id, mp_email, old_tier, new_tier, reason),
+        )
+        conn.commit()
+
+
+def get_tier_changes(limit: int = 50) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT discord_id, mp_email, old_tier, new_tier, changed_at, reason "
+            "FROM tier_changes ORDER BY changed_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(zip(["discord_id", "mp_email", "old_tier", "new_tier", "changed_at", "reason"], row)) for row in rows]
+
 
 def upsert_member(discord_id: str, mp_member_id: int, mp_email: str, tier: str):
     now = datetime.utcnow().isoformat()

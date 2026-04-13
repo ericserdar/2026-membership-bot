@@ -120,6 +120,7 @@ class CougConnectBot(commands.Bot):
                 new_tier = mp.resolve_tier(active_ids)
                 if new_tier != record["tier"]:
                     log.info(f"Sync: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
+                    db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="auto-sync")
                     db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
                     await assign_role(int(record["discord_id"]), new_tier)
                     if new_tier == "unsubscribed" and record["tier"] != "unsubscribed":
@@ -253,6 +254,9 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
         active_ids = await mp.get_active_membership_ids(mp_id)
     tier = mp.resolve_tier(active_ids)
 
+    existing = db.get_member_by_discord(str(user.id))
+    old_tier = existing["tier"] if existing else "none"
+    db.log_tier_change(str(user.id), email, old_tier, tier, reason="link-member")
     db.upsert_member(str(user.id), mp_id, email, tier)
     success = await assign_role(user.id, tier)
 
@@ -294,6 +298,8 @@ async def sync_member(interaction: discord.Interaction, user: discord.Member):
 
     active_ids = await mp.get_active_membership_ids(existing["mp_member_id"])
     tier = mp.resolve_tier(active_ids)
+    if tier != existing["tier"]:
+        db.log_tier_change(str(user.id), existing["mp_email"], existing["tier"], tier, reason="sync-member")
     db.upsert_member(str(user.id), existing["mp_member_id"], existing["mp_email"], tier)
     await assign_role(user.id, tier)
     await interaction.followup.send(
@@ -410,6 +416,7 @@ async def sync_all(interaction: discord.Interaction):
             active_ids = await mp.get_active_membership_ids(record["mp_member_id"])
             new_tier = mp.resolve_tier(active_ids)
             if new_tier != record["tier"]:
+                db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="sync-all")
                 db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
                 await assign_role(int(record["discord_id"]), new_tier)
                 changed += 1
@@ -422,6 +429,24 @@ async def sync_all(interaction: discord.Interaction):
         f"✅ Sync complete — checked **{len(members)}** members, updated **{changed}** role(s).",
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="tier-history", description="Show recent tier changes")
+@app_commands.default_permissions(administrator=True)
+async def tier_history(interaction: discord.Interaction):
+    changes = db.get_tier_changes(limit=20)
+    if not changes:
+        await interaction.response.send_message("No tier changes recorded yet.", ephemeral=True)
+        return
+    embed = discord.Embed(title="📋 Recent Tier Changes", color=discord.Color.blurple())
+    lines = []
+    for c in changes:
+        lines.append(
+            f"`{c['changed_at'][:16]}` **{c['mp_email']}** — "
+            f"{tier_label(c['old_tier'])} → {tier_label(c['new_tier'])} *(_{c['reason']}_)*"
+        )
+    embed.description = "\n".join(lines)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="stats", description="Membership stats breakdown")
@@ -662,6 +687,7 @@ async def handle_webhook(request: web.Request) -> web.Response:
     }
 
     if event in inactive_events:
+        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"webhook:{event}")
         db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], "unsubscribed")
         await assign_role(discord_id, "unsubscribed")
         log.info(f"Set discord_id={discord_id} to unsubscribed via event={event}")
@@ -680,6 +706,7 @@ async def handle_webhook(request: web.Request) -> web.Response:
         # Re-fetch tier from MemberPress
         active_ids = await mp.get_active_membership_ids(mp_member_id)
         tier = mp.resolve_tier(active_ids)
+        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], tier, reason=f"webhook:{event}")
         db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], tier)
         await assign_role(discord_id, tier)
         log.info(f"Re-activated discord_id={discord_id} as tier={tier} via event={event}")
