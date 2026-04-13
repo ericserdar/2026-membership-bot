@@ -141,6 +141,7 @@ class CougConnectBot(commands.Bot):
     @sync_all_members_task.before_loop
     async def before_sync(self):
         await self.wait_until_ready()
+        await asyncio.sleep(3600)  # Wait 1 hour after startup before first sync
 
 
 bot = CougConnectBot()
