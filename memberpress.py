@@ -78,7 +78,7 @@ async def get_member_by_id(mp_member_id: int) -> dict | None:
             return await resp.json()
 
 
-async def get_active_membership_ids(mp_member_id: int) -> list[int]:
+async def get_active_membership_ids(mp_member_id: int, mp_email: str = "") -> list[int]:
     """Return list of membership IDs the member currently has active."""
     import logging
     log = logging.getLogger("cougconnect")
@@ -105,7 +105,7 @@ async def get_active_membership_ids(mp_member_id: int) -> list[int]:
     # Also check active_memberships from the member object and merge — this catches:
     # - Cancelled-but-not-expired subs (status "stopped" in subscriptions but still in active_memberships)
     # - Members with multiple tiers where some subs have non-active statuses
-    fallback_ids = await _get_active_ids_from_member(mp_member_id)
+    fallback_ids = await _get_active_ids_from_member(mp_member_id, mp_email)
     merged = list(set(active) | set(fallback_ids))
     log.info(f"Merged membership IDs: {merged} (subscriptions={active}, member_object={fallback_ids}) | gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
     return merged
@@ -125,14 +125,18 @@ def active_ids_from_member_object(member: dict) -> list[int]:
     return ids
 
 
-async def _get_active_ids_from_member(mp_member_id: int) -> list[int]:
+async def _get_active_ids_from_member(mp_member_id: int, mp_email: str = "") -> list[int]:
     """Fallback: read active_memberships from the member object itself."""
     import logging
     log = logging.getLogger("cougconnect")
     member = await get_member_by_id(mp_member_id)
     if not member:
-        log.warning(f"Fallback: get_member_by_id({mp_member_id}) returned None (rate-limited or not found)")
-        return []
+        log.warning(f"Fallback: get_member_by_id({mp_member_id}) returned None — trying email lookup")
+        if mp_email:
+            member = await get_member_by_email(mp_email)
+        if not member:
+            log.warning(f"Fallback: email lookup also failed for mp_member_id={mp_member_id} email={mp_email}")
+            return []
     return active_ids_from_member_object(member)
 
 
