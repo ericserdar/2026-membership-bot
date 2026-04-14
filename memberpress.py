@@ -79,36 +79,16 @@ async def get_member_by_id(mp_member_id: int) -> dict | None:
 
 
 async def get_active_membership_ids(mp_member_id: int, mp_email: str = "") -> list[int]:
-    """Return list of membership IDs the member currently has active."""
+    """Return list of membership IDs the member currently has active.
+
+    The /members/{id}/subscriptions endpoint returns 404 for this MemberPress setup,
+    so we go straight to the member object's active_memberships field.
+    """
     import logging
     log = logging.getLogger("cougconnect")
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            _api(f"members/{mp_member_id}/subscriptions"),
-            headers={"MEMBERPRESS-API-KEY": MP_KEY},
-        ) as resp:
-            log.info(f"Subscriptions endpoint status={resp.status} for mp_member_id={mp_member_id}")
-            if resp.status != 200:
-                body = await resp.text()
-                log.error(f"Subscriptions error: {body}")
-                # Fall back to member object active_memberships
-                return await _get_active_ids_from_member(mp_member_id)
-            subs = await resp.json()
-            log.info(f"Raw subscriptions: {subs}")
-    active = []
-    for sub in subs:
-        status = sub.get("status")
-        mid = sub.get("membership", {}).get("id") or sub.get("membership_id")
-        log.info(f"  sub status={status} membership_id={mid}")
-        if status in ("active", "complete") and mid:
-            active.append(int(mid))
-    # Also check active_memberships from the member object and merge — this catches:
-    # - Cancelled-but-not-expired subs (status "stopped" in subscriptions but still in active_memberships)
-    # - Members with multiple tiers where some subs have non-active statuses
-    fallback_ids = await _get_active_ids_from_member(mp_member_id, mp_email)
-    merged = list(set(active) | set(fallback_ids))
-    log.info(f"Merged membership IDs: {merged} (subscriptions={active}, member_object={fallback_ids}) | gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
-    return merged
+    ids = await _get_active_ids_from_member(mp_member_id, mp_email)
+    log.info(f"Active membership IDs for mp_member_id={mp_member_id}: {ids} | gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
+    return ids
 
 
 def active_ids_from_member_object(member: dict) -> list[int]:
