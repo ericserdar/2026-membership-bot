@@ -112,10 +112,13 @@ class CougConnectBot(commands.Bot):
         channel = self.get_channel(UNSUBSCRIBED_CHANNEL_ID)
         if not channel:
             return
-        async for msg in channel.history(limit=20):
-            if msg.author == self.user and msg.components:
-                await msg.delete()
-                break
+        try:
+            async for msg in channel.history(limit=20):
+                if msg.author == self.user and msg.components:
+                    await msg.delete()
+                    break
+        except discord.Forbidden:
+            log.warning(f"No Read Message History permission in unsubscribed channel {UNSUBSCRIBED_CHANNEL_ID} — skipping cleanup")
         embed = discord.Embed(
             title="🔄 Reactivate Your CougConnect Membership",
             description=(
@@ -808,9 +811,23 @@ async def handle_webhook(request: web.Request) -> web.Response:
             pass
 
     elif event in reactivate_events:
-        # Re-fetch tier from MemberPress
+        # Wait for MemberPress to fully commit the subscription before querying.
+        # Webhooks fire immediately on payment but the subscription may not be
+        # in the API yet — this prevents incorrectly resolving to Unsubscribed.
+        await asyncio.sleep(15)
         active_ids = await mp.get_active_membership_ids(mp_member_id, record["mp_email"])
         tier = mp.resolve_tier(active_ids)
+        if tier == "unsubscribed":
+            log.warning(
+                f"Webhook {event} for discord_id={discord_id} resolved to unsubscribed — "
+                f"MemberPress may still be processing. Skipping update; use /sync-member to retry."
+            )
+            await post_admin_log(
+                f"⚠️ **Webhook race condition** — <@{discord_id}> (`{record['mp_email']}`)\n"
+                f"Event `{event}` fired but MemberPress API returned no active membership.\n"
+                f"Use `/sync-member` in a few minutes to retry."
+            )
+            return web.json_response({"status": "skipped — unsubscribed after reactivate event"})
         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], tier, reason=f"webhook:{event}")
         db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], tier)
         await assign_role(discord_id, tier)
