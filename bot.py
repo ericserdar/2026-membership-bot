@@ -38,6 +38,8 @@ log = logging.getLogger("cougconnect")
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 VERIFY_CHANNEL_ID = int(os.getenv("DISCORD_VERIFY_CHANNEL_ID", "0"))
+UNSUBSCRIBED_CHANNEL_ID = int(os.getenv("DISCORD_UNSUBSCRIBED_CHANNEL_ID", "1360788474374000700"))
+ADMIN_LOG_CHANNEL_ID = int(os.getenv("DISCORD_ADMIN_LOG_CHANNEL_ID", "1493610618094227577"))
 PORT = int(os.getenv("PORT", "8080"))
 BOT_PUBLIC_URL = os.getenv("BOT_PUBLIC_URL", "http://localhost:8080")
 MP_WEBHOOK_SECRET = os.getenv("MEMBERPRESS_WEBHOOK_SECRET", "")
@@ -74,6 +76,7 @@ class CougConnectBot(commands.Bot):
         db.init_db()
         mp.load_tier_ids()
         self.add_view(VerifyView())
+        self.add_view(ReSyncView())
         await self.tree.sync()
         log.info("Slash commands synced.")
         self.cleanup_tokens_task.start()
@@ -82,6 +85,8 @@ class CougConnectBot(commands.Bot):
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
         await self._post_verify_embed()
+        await self._post_unsubscribed_embed()
+        await post_admin_log("✅ CougConnect bot online and ready.")
 
     async def _post_verify_embed(self):
         channel = self.get_channel(VERIFY_CHANNEL_ID)
@@ -103,6 +108,26 @@ class CougConnectBot(commands.Bot):
         embed.set_footer(text="CougConnect — Insider BYU Athletics Coverage")
         await channel.send(embed=embed, view=VerifyView())
 
+    async def _post_unsubscribed_embed(self):
+        channel = self.get_channel(UNSUBSCRIBED_CHANNEL_ID)
+        if not channel:
+            return
+        async for msg in channel.history(limit=20):
+            if msg.author == self.user and msg.components:
+                await msg.delete()
+                break
+        embed = discord.Embed(
+            title="🔄 Reactivate Your CougConnect Membership",
+            description=(
+                "If you've renewed or upgraded your membership, click **Re-sync My Role** "
+                "and your Discord role will be updated automatically.\n\n"
+                "Not yet a member? Click **Upgrade Membership** to subscribe."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="CougConnect — Insider BYU Athletics Coverage")
+        await channel.send(embed=embed, view=ReSyncView())
+
     @tasks.loop(hours=1)
     async def cleanup_tokens_task(self):
         db.cleanup_expired_tokens()
@@ -119,20 +144,22 @@ class CougConnectBot(commands.Bot):
                 active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
                 new_tier = mp.resolve_tier(active_ids)
                 if new_tier != record["tier"]:
-                    log.info(f"Sync: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
-                    db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="auto-sync")
-                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
-                    await assign_role(int(record["discord_id"]), new_tier)
-                    if new_tier == "unsubscribed" and record["tier"] != "unsubscribed":
-                        try:
-                            user = await self.fetch_user(int(record["discord_id"]))
-                            await user.send(
-                                "Your CougConnect membership has expired. "
-                                "Renew at https://cougconnect.com to restore your access. 🏈"
-                            )
-                        except Exception:
-                            pass
-                    changed += 1
+                    # Safety: never downgrade an active member in the auto-sync.
+                    # Real cancellations are handled by MemberPress webhooks.
+                    # This prevents API failures from incorrectly demoting members.
+                    if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
+                        log.warning(f"Auto-sync skipping downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — use webhook or /sync-member to demote")
+                        await post_admin_log(
+                            f"⚠️ **Skipped downgrade** — <@{record['discord_id']}> (`{record['mp_email']}`)\n"
+                            f"MemberPress shows **Unsubscribed** but member has **{record['tier'].title()}** role.\n"
+                            f"Use `/sync-member` to demote manually if confirmed cancelled."
+                        )
+                    else:
+                        log.info(f"Sync: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
+                        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="auto-sync")
+                        db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                        await assign_role(int(record["discord_id"]), new_tier)
+                        changed += 1
                 else:
                     db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
             except Exception as e:
@@ -152,6 +179,16 @@ bot = CougConnectBot()
 
 def get_guild() -> discord.Guild | None:
     return bot.get_guild(GUILD_ID)
+
+
+async def post_admin_log(message: str):
+    """Post a message to the admin log channel."""
+    channel = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if channel:
+        try:
+            await channel.send(message)
+        except Exception as e:
+            log.error(f"Failed to post admin log: {e}")
 
 
 async def assign_role(discord_id: int, tier: str) -> bool:
@@ -234,6 +271,65 @@ class VerifyView(discord.ui.View):
                 await interaction.response.send_message("Something went wrong. Please try again in a moment.", ephemeral=True)
             except Exception:
                 pass
+
+
+# ── Re-sync button (unsubscribed channel) ─────────────────────────────────────
+
+class ReSyncView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label="Upgrade Membership",
+            url="https://cougconnect.com/account/",
+            style=discord.ButtonStyle.link,
+            emoji="⬆️",
+        ))
+
+    @discord.ui.button(label="Re-sync My Role", style=discord.ButtonStyle.success, emoji="🔄", custom_id="resync_role")
+    async def resync_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        discord_id = str(interaction.user.id)
+        record = db.get_member_by_discord(discord_id)
+        if not record:
+            embed = discord.Embed(
+                title="Not Verified",
+                description=(
+                    "Your Discord account isn't linked to a CougConnect membership yet.\n\n"
+                    "Head to the verify channel and click **Verify Membership** to get started."
+                ),
+                color=discord.Color.red(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
+        new_tier = mp.resolve_tier(active_ids)
+
+        if new_tier == "unsubscribed":
+            embed = discord.Embed(
+                title="No Active Subscription Found",
+                description=(
+                    f"We checked your account (`{record['mp_email']}`) but couldn't find an active membership.\n\n"
+                    "If you just subscribed, it may take a minute — please try again shortly. "
+                    "Otherwise, click **Upgrade Membership** above to subscribe."
+                ),
+                color=discord.Color.dark_grey(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        old_tier = record["tier"]
+        db.log_tier_change(discord_id, record["mp_email"], old_tier, new_tier, reason="resync-button")
+        db.upsert_member(discord_id, record["mp_member_id"], record["mp_email"], new_tier)
+        await assign_role(int(discord_id), new_tier)
+
+        embed = discord.Embed(
+            title="✅ Role Updated!",
+            description=f"Your membership was confirmed and you've been given the **{tier_label(new_tier)}** role. Welcome back!",
+            color=tier_color(new_tier),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        log.info(f"Resync button: discord_id={discord_id} {old_tier} → {new_tier}")
 
 
 # ── Slash commands ─────────────────────────────────────────────────────────────
@@ -416,10 +512,18 @@ async def sync_all(interaction: discord.Interaction):
             active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
             new_tier = mp.resolve_tier(active_ids)
             if new_tier != record["tier"]:
-                db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="sync-all")
-                db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
-                await assign_role(int(record["discord_id"]), new_tier)
-                changed += 1
+                if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
+                    log.warning(f"sync-all skipping downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — use /sync-member to demote manually")
+                    await post_admin_log(
+                        f"⚠️ **Skipped downgrade** — <@{record['discord_id']}> (`{record['mp_email']}`)\n"
+                        f"MemberPress shows **Unsubscribed** but member has **{record['tier'].title()}** role.\n"
+                        f"Use `/sync-member` to demote manually if confirmed cancelled."
+                    )
+                else:
+                    db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="sync-all")
+                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                    await assign_role(int(record["discord_id"]), new_tier)
+                    changed += 1
             else:
                 db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
         except Exception as e:
@@ -683,6 +787,7 @@ async def handle_webhook(request: web.Request) -> web.Response:
     }
     reactivate_events = {
         "subscription-resumed", "subscription-renewed", "subscription-upgraded",
+        "subscription-created", "transaction-completed",
         "member-signup-completed",
     }
 
