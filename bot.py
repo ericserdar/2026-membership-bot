@@ -431,16 +431,26 @@ async def lookup_email(interaction: discord.Interaction, email: str):
 @app_commands.describe(user="Discord member to look up")
 @app_commands.default_permissions(manage_roles=True)
 async def get_info(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer(ephemeral=True)
     record = db.get_member_by_discord(str(user.id))
     if not record:
-        await interaction.response.send_message(f"❌ **{user.display_name}** has not verified their membership.", ephemeral=True)
+        await interaction.followup.send(f"❌ **{user.display_name}** has not verified their membership.", ephemeral=True)
         return
     embed = discord.Embed(title="Member Info", color=discord.Color.blue())
     embed.add_field(name="Discord", value=f"{user.mention} (`{user.id}`)", inline=False)
     embed.add_field(name="Email", value=record["mp_email"], inline=False)
     embed.add_field(name="Tier", value=tier_label(record["tier"]), inline=True)
     embed.add_field(name="Linked", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # Show active membership IDs from MemberPress
+    mp_member = await mp.get_member_by_id(record["mp_member_id"])
+    if mp_member:
+        active_memberships = mp_member.get("active_memberships", [])
+        if len(active_memberships) > 1:
+            names = [m.get("title", f"ID {m.get('id')}") if isinstance(m, dict) else f"ID {m}" for m in active_memberships]
+            embed.add_field(name="Active Subscriptions", value="\n".join(f"• {n}" for n in names), inline=False)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="profile", description="Full membership profile for a Discord user")
@@ -468,6 +478,14 @@ async def profile(interaction: discord.Interaction, user: discord.Member):
         embed.add_field(name="Expires", value=sub_status["expires_at"], inline=True)
     embed.add_field(name="Linked On", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
     embed.add_field(name="Last Synced", value=record["last_synced"][:10] if record["last_synced"] else "—", inline=True)
+
+    # Show all active subscriptions if more than one
+    if mp_data:
+        active_memberships = mp_data.get("active_memberships", [])
+        if len(active_memberships) > 1:
+            names = [m.get("title", f"ID {m.get('id')}") if isinstance(m, dict) else f"ID {m}" for m in active_memberships]
+            embed.add_field(name="Active Subscriptions", value="\n".join(f"• {n}" for n in names), inline=False)
+
     embed.set_footer(text="CougConnect Membership Bot")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
