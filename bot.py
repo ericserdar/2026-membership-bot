@@ -804,12 +804,15 @@ async def handle_webhook(request: web.Request) -> web.Response:
 
     inactive_events = {
         "subscription-expired", "subscription-cancelled", "subscription-stopped",
-        "member-account-expired", "subscription-paused",
+        "member-account-expired",
+        # NOTE: subscription-paused is NOT here — paused means billing is paused
+        # but access continues until the expiry date. We re-fetch from MemberPress
+        # to let the API decide rather than immediately demoting.
     }
     reactivate_events = {
         "subscription-resumed", "subscription-renewed", "subscription-upgraded",
         "subscription-created", "transaction-completed",
-        "member-signup-completed",
+        "member-signup-completed", "subscription-paused",
     }
 
     if event in inactive_events:
