@@ -93,6 +93,17 @@ def log_tier_change(discord_id: str, mp_email: str, old_tier: str, new_tier: str
         conn.commit()
 
 
+def get_tier_changes_since(hours: int = 24) -> list[dict]:
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT discord_id, mp_email, old_tier, new_tier, changed_at, reason "
+            "FROM tier_changes WHERE changed_at >= ? ORDER BY changed_at DESC",
+            (cutoff,),
+        ).fetchall()
+    return [dict(zip(["discord_id", "mp_email", "old_tier", "new_tier", "changed_at", "reason"], row)) for row in rows]
+
+
 def get_tier_changes(limit: int = 50) -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(

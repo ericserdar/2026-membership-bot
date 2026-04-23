@@ -81,6 +81,7 @@ class CougConnectBot(commands.Bot):
         log.info("Slash commands synced.")
         self.cleanup_tokens_task.start()
         self.sync_all_members_task.start()
+        self.daily_report_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -172,6 +173,51 @@ class CougConnectBot(commands.Bot):
 
     @sync_all_members_task.before_loop
     async def before_sync(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=3, minute=0, tzinfo=datetime.timezone.utc))  # 8pm MST (UTC-7)
+    async def daily_report_task(self):
+        changes = db.get_tier_changes_since(hours=24)
+
+        reactivations  = [c for c in changes if c["new_tier"] != "unsubscribed" and c["old_tier"] == "unsubscribed" and "webhook" in c.get("reason", "")]
+        cancellations  = [c for c in changes if c["new_tier"] == "unsubscribed" and "webhook" in c.get("reason", "")]
+        skipped        = [c for c in changes if "skipping downgrade" in c.get("reason", "") or c.get("reason","") == "skipped"]
+        new_links      = [c for c in changes if c["old_tier"] in ("none", None) and c["new_tier"] != "unsubscribed"]
+        resync         = [c for c in changes if c.get("reason") == "resync-button"]
+
+        needs_attention = skipped  # add more conditions here as needed
+
+        lines = ["**📊 CougConnect Daily Report**"]
+
+        if not changes:
+            lines.append("✅ All clear — no tier changes in the last 24 hours.")
+        else:
+            lines.append(f"✅ **{len(reactivations)}** reactivation(s)  |  ❌ **{len(cancellations)}** cancellation(s)  |  🔗 **{len(new_links)}** new verification(s)  |  🔄 **{len(resync)}** resync(s)")
+
+            if reactivations:
+                lines.append("\n**Reactivated:**")
+                for c in reactivations:
+                    lines.append(f"• <@{c['discord_id']}> (`{c['mp_email']}`) → **{tier_label(c['new_tier'])}** via `{c['reason']}`")
+
+            if cancellations:
+                lines.append("\n**Cancelled/Expired:**")
+                for c in cancellations:
+                    lines.append(f"• <@{c['discord_id']}> (`{c['mp_email']}`) via `{c['reason']}`")
+
+            if new_links:
+                lines.append("\n**New Verifications:**")
+                for c in new_links:
+                    lines.append(f"• <@{c['discord_id']}> (`{c['mp_email']}`) → **{tier_label(c['new_tier'])}**")
+
+        if needs_attention:
+            lines.append("\n⚠️ **Needs Attention:**")
+            for c in needs_attention:
+                lines.append(f"• <@{c['discord_id']}> (`{c['mp_email']}`) — skipped downgrade, use `/sync-member` if confirmed cancelled")
+
+        await post_admin_log("\n".join(lines))
+
+    @daily_report_task.before_loop
+    async def before_daily_report(self):
         await self.wait_until_ready()
 
 
