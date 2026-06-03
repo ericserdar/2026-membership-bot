@@ -148,16 +148,20 @@ class CougConnectBot(commands.Bot):
                 active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
                 new_tier = mp.resolve_tier(active_ids)
                 if new_tier != record["tier"]:
-                    # Safety: never downgrade an active member in the auto-sync.
-                    # Real cancellations are handled by MemberPress webhooks.
-                    # This prevents API failures from incorrectly demoting members.
+                    # Double-check before downgrading to guard against transient API failures.
+                    # If MemberPress confirms unsubscribed on a second call, it's a real cancellation.
                     if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
-                        log.warning(f"Auto-sync skipping downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — use webhook or /sync-member to demote")
-                        await post_admin_log(
-                            f"⚠️ **Skipped downgrade** — <@{record['discord_id']}> (`{record['mp_email']}`)\n"
-                            f"MemberPress shows **Unsubscribed** but member has **{record['tier'].title()}** role.\n"
-                            f"Use `/sync-member` to demote manually if confirmed cancelled."
-                        )
+                        await asyncio.sleep(30)
+                        verify_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
+                        verify_tier = mp.resolve_tier(verify_ids)
+                        if verify_tier == "unsubscribed":
+                            log.info(f"Auto-sync confirmed downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — tier {record['tier']} → unsubscribed")
+                            db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason="auto-sync:confirmed")
+                            db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
+                            await assign_role(int(record["discord_id"]), "unsubscribed")
+                            changed += 1
+                        else:
+                            log.warning(f"Auto-sync: discord_id={record['discord_id']} showed unsubscribed then {verify_tier} — transient API issue, skipping")
                     else:
                         log.info(f"Sync: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
                         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="auto-sync")
@@ -580,12 +584,17 @@ async def sync_all(interaction: discord.Interaction):
             new_tier = mp.resolve_tier(active_ids)
             if new_tier != record["tier"]:
                 if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
-                    log.warning(f"sync-all skipping downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — use /sync-member to demote manually")
-                    await post_admin_log(
-                        f"⚠️ **Skipped downgrade** — <@{record['discord_id']}> (`{record['mp_email']}`)\n"
-                        f"MemberPress shows **Unsubscribed** but member has **{record['tier'].title()}** role.\n"
-                        f"Use `/sync-member` to demote manually if confirmed cancelled."
-                    )
+                    await asyncio.sleep(30)
+                    verify_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
+                    verify_tier = mp.resolve_tier(verify_ids)
+                    if verify_tier == "unsubscribed":
+                        log.info(f"sync-all confirmed downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — tier {record['tier']} → unsubscribed")
+                        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason="sync-all:confirmed")
+                        db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
+                        await assign_role(int(record["discord_id"]), "unsubscribed")
+                        changed += 1
+                    else:
+                        log.warning(f"sync-all: discord_id={record['discord_id']} showed unsubscribed then {verify_tier} — transient API issue, skipping")
                 else:
                     db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="sync-all")
                     db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
@@ -849,16 +858,19 @@ async def handle_webhook(request: web.Request) -> web.Response:
     discord_id = int(record["discord_id"])
 
     inactive_events = {
-        "subscription-expired", "subscription-cancelled", "subscription-stopped",
+        "subscription-expired",
         "member-account-expired",
-        # NOTE: subscription-paused is NOT here — paused means billing is paused
-        # but access continues until the expiry date. We re-fetch from MemberPress
-        # to let the API decide rather than immediately demoting.
+        # NOTE: subscription-stopped and subscription-cancelled are NOT here.
+        # Those fire when auto-renewal is cancelled but access continues until the
+        # paid period ends. We re-fetch from MemberPress to get the real current tier
+        # rather than immediately demoting. The member will be downgraded when
+        # subscription-expired fires at the end of their paid period.
     }
     reactivate_events = {
         "subscription-resumed", "subscription-renewed", "subscription-upgraded",
         "subscription-created", "transaction-completed",
         "member-signup-completed", "subscription-paused",
+        "subscription-stopped", "subscription-cancelled",
     }
 
     if event in inactive_events:
