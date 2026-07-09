@@ -12,13 +12,13 @@ CougConnect Discord Membership Bot
 import asyncio
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
 import datetime
-from datetime import datetime as dt
+from datetime import datetime as dt, timezone
 
-import aiohttp
 import aiohttp.web as web
 import discord
 from discord import app_commands
@@ -142,37 +142,7 @@ class CougConnectBot(commands.Bot):
         if not members:
             return
         log.info(f"Starting periodic sync for {len(members)} linked members...")
-        changed = 0
-        for record in members:
-            try:
-                active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
-                new_tier = mp.resolve_tier(active_ids)
-                if new_tier != record["tier"]:
-                    # Double-check before downgrading to guard against transient API failures.
-                    # If MemberPress confirms unsubscribed on a second call, it's a real cancellation.
-                    if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
-                        await asyncio.sleep(30)
-                        verify_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
-                        verify_tier = mp.resolve_tier(verify_ids)
-                        if verify_tier == "unsubscribed":
-                            log.info(f"Auto-sync confirmed downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — tier {record['tier']} → unsubscribed")
-                            db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason="auto-sync:confirmed")
-                            db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
-                            await assign_role(int(record["discord_id"]), "unsubscribed")
-                            changed += 1
-                        else:
-                            log.warning(f"Auto-sync: discord_id={record['discord_id']} showed unsubscribed then {verify_tier} — transient API issue, skipping")
-                    else:
-                        log.info(f"Sync: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
-                        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="auto-sync")
-                        db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
-                        await assign_role(int(record["discord_id"]), new_tier)
-                        changed += 1
-                else:
-                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
-            except Exception as e:
-                log.error(f"Sync error for discord_id={record['discord_id']}: {e}")
-            await asyncio.sleep(5)
+        changed = await sync_members(members, reason="auto-sync", delay_between=5)
         log.info(f"Periodic sync complete. {changed} role(s) updated out of {len(members)} members.")
 
     @sync_all_members_task.before_loop
@@ -249,14 +219,16 @@ async def assign_role(discord_id: int, tier: str) -> bool:
     guild = get_guild()
     if not guild:
         return False
-    member = guild.get_member(discord_id) or await guild.fetch_member(discord_id)
+    member = guild.get_member(discord_id)
     if not member:
-        return False
+        try:
+            member = await guild.fetch_member(discord_id)
+        except discord.NotFound:
+            log.warning(f"Member {discord_id} not found in guild — cannot assign role")
+            return False
 
-    roles_to_remove = [
-        guild.get_role(rid) for rid in ROLE_IDS.values()
-        if guild.get_role(rid) and guild.get_role(rid) in member.roles
-    ]
+    tier_roles = [guild.get_role(rid) for rid in ROLE_IDS.values()]
+    roles_to_remove = [r for r in tier_roles if r and r in member.roles]
     new_role = guild.get_role(ROLE_IDS.get(tier, 0))
     if not new_role:
         log.warning(f"Role ID not configured for tier '{tier}'")
@@ -268,8 +240,56 @@ async def assign_role(discord_id: int, tier: str) -> bool:
     return True
 
 
+async def sync_members(members: list, reason: str, delay_between: float) -> int:
+    """Re-check each linked member against MemberPress and update tier/role.
+
+    Downgrades to unsubscribed are double-checked after 30s to guard against
+    transient API failures. Returns the number of roles changed.
+    """
+    changed = 0
+    for record in members:
+        try:
+            active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
+            new_tier = mp.resolve_tier(active_ids)
+            if new_tier != record["tier"]:
+                if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
+                    await asyncio.sleep(30)
+                    verify_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
+                    verify_tier = mp.resolve_tier(verify_ids)
+                    if verify_tier == "unsubscribed":
+                        log.info(f"{reason} confirmed downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — tier {record['tier']} → unsubscribed")
+                        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"{reason}:confirmed")
+                        db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
+                        await assign_role(int(record["discord_id"]), "unsubscribed")
+                        changed += 1
+                    else:
+                        log.warning(f"{reason}: discord_id={record['discord_id']} showed unsubscribed then {verify_tier} — transient API issue, skipping")
+                else:
+                    log.info(f"{reason}: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
+                    db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason=reason)
+                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                    await assign_role(int(record["discord_id"]), new_tier)
+                    changed += 1
+            else:
+                db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+        except Exception as e:
+            log.error(f"{reason} error for discord_id={record['discord_id']}: {e}")
+        await asyncio.sleep(delay_between)
+    return changed
+
+
 def tier_label(tier: str) -> str:
     return {"gold": "Gold", "silver": "Silver", "insider": "Insider", "unsubscribed": "Unsubscribed"}.get(tier, tier.title())
+
+
+def add_active_subscriptions_field(embed: discord.Embed, mp_member: dict | None):
+    """List all active MemberPress subscriptions on the embed when there's more than one."""
+    if not mp_member:
+        return
+    active_memberships = mp_member.get("active_memberships", [])
+    if len(active_memberships) > 1:
+        names = [m.get("title", f"ID {m.get('id')}") if isinstance(m, dict) else f"ID {m}" for m in active_memberships]
+        embed.add_field(name="Active Subscriptions", value="\n".join(f"• {n}" for n in names), inline=False)
 
 
 def tier_color(tier: str) -> discord.Color:
@@ -416,7 +436,7 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
         )
     else:
         await interaction.followup.send(
-            f"⚠️ Saved link but couldn't assign role — check role IDs in config.",
+            "⚠️ Saved link but couldn't assign role — check role IDs in config.",
             ephemeral=True,
         )
 
@@ -492,13 +512,8 @@ async def get_info(interaction: discord.Interaction, user: discord.Member):
     embed.add_field(name="Tier", value=tier_label(record["tier"]), inline=True)
     embed.add_field(name="Linked", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
 
-    # Show active membership IDs from MemberPress
     mp_member = await mp.get_member_by_id(record["mp_member_id"])
-    if mp_member:
-        active_memberships = mp_member.get("active_memberships", [])
-        if len(active_memberships) > 1:
-            names = [m.get("title", f"ID {m.get('id')}") if isinstance(m, dict) else f"ID {m}" for m in active_memberships]
-            embed.add_field(name="Active Subscriptions", value="\n".join(f"• {n}" for n in names), inline=False)
+    add_active_subscriptions_field(embed, mp_member)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -529,12 +544,7 @@ async def profile(interaction: discord.Interaction, user: discord.Member):
     embed.add_field(name="Linked On", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
     embed.add_field(name="Last Synced", value=record["last_synced"][:10] if record["last_synced"] else "—", inline=True)
 
-    # Show all active subscriptions if more than one
-    if mp_data:
-        active_memberships = mp_data.get("active_memberships", [])
-        if len(active_memberships) > 1:
-            names = [m.get("title", f"ID {m.get('id')}") if isinstance(m, dict) else f"ID {m}" for m in active_memberships]
-            embed.add_field(name="Active Subscriptions", value="\n".join(f"• {n}" for n in names), inline=False)
+    add_active_subscriptions_field(embed, mp_data)
 
     embed.set_footer(text="CougConnect Membership Bot")
     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -577,34 +587,7 @@ async def sync_all(interaction: discord.Interaction):
     if not members:
         await interaction.followup.send("No linked members to sync.", ephemeral=True)
         return
-    changed = 0
-    for record in members:
-        try:
-            active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
-            new_tier = mp.resolve_tier(active_ids)
-            if new_tier != record["tier"]:
-                if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
-                    await asyncio.sleep(30)
-                    verify_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
-                    verify_tier = mp.resolve_tier(verify_ids)
-                    if verify_tier == "unsubscribed":
-                        log.info(f"sync-all confirmed downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — tier {record['tier']} → unsubscribed")
-                        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason="sync-all:confirmed")
-                        db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
-                        await assign_role(int(record["discord_id"]), "unsubscribed")
-                        changed += 1
-                    else:
-                        log.warning(f"sync-all: discord_id={record['discord_id']} showed unsubscribed then {verify_tier} — transient API issue, skipping")
-                else:
-                    db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason="sync-all")
-                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
-                    await assign_role(int(record["discord_id"]), new_tier)
-                    changed += 1
-            else:
-                db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
-        except Exception as e:
-            log.error(f"sync-all error for discord_id={record['discord_id']}: {e}")
-        await asyncio.sleep(0.5)
+    changed = await sync_members(members, reason="sync-all", delay_between=0.5)
     await interaction.followup.send(
         f"✅ Sync complete — checked **{len(members)}** members, updated **{changed}** role(s).",
         ephemeral=True,
@@ -639,7 +622,7 @@ async def stats(interaction: discord.Interaction):
     embed.add_field(name="🥈 Silver", value=str(s["silver"]), inline=True)
     embed.add_field(name="🔵 Insider", value=str(s["insider"]), inline=True)
     embed.add_field(name="❌ Unsubscribed", value=str(s["unsubscribed"]), inline=True)
-    embed.set_footer(text=f"As of {dt.utcnow().strftime('%m/%d/%Y %H:%M')} UTC")
+    embed.set_footer(text=f"As of {dt.now(timezone.utc).strftime('%m/%d/%Y %H:%M')} UTC")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -731,8 +714,8 @@ async def handle_verify_page_get(request: web.Request) -> web.Response:
         <h1>🔐 Verify Membership</h1>
         <p>Enter the email address associated with your CougConnect subscription.</p>
         <form method="POST" action="/verify-page">
-          <input type="hidden" name="token" value="{token}">
-          <input type="hidden" name="discord_id" value="{discord_id}">
+          <input type="hidden" name="token" value="{html.escape(token, quote=True)}">
+          <input type="hidden" name="discord_id" value="{html.escape(discord_id, quote=True)}">
           <input type="email" name="email" placeholder="your@email.com" required autofocus>
           <button type="submit">Verify My Membership</button>
         </form>
@@ -750,6 +733,7 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     token = data.get("token", "")
     discord_id = data.get("discord_id", "")
     email = data.get("email", "").strip().lower()
+    safe_email = html.escape(email)
 
     if not all([token, discord_id, email]):
         return _page("Error", "<h1>❌ Missing Info</h1><p>Please go back and fill in your email address.</p>")
@@ -770,7 +754,7 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     if existing_link and existing_link["discord_id"] != discord_id:
         return _page("Already Linked", f"""
             <h1>⚠️ Email Already Linked</h1>
-            <p><strong>{email}</strong> is already connected to a different Discord account.</p>
+            <p><strong>{safe_email}</strong> is already connected to a different Discord account.</p>
             <p>If this is a mistake, please contact an admin in the Discord server.</p>
         """)
 
@@ -779,7 +763,7 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     if not mp_member:
         return _page("Not Found", f"""
             <h1>❌ Email Not Found</h1>
-            <p>No CougConnect account was found for <strong>{email}</strong>.</p>
+            <p>No CougConnect account was found for <strong>{safe_email}</strong>.</p>
             <p>Make sure you're using the email you signed up with, or
                <a href="https://cougconnect.com" style="color:#3b82f6;">visit CougConnect</a> to create an account.</p>
         """)
@@ -793,7 +777,7 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     if tier == "unsubscribed":
         return _page("No Active Subscription", f"""
             <h1>⚠️ No Active Subscription</h1>
-            <p>The account for <strong>{email}</strong> doesn't have an active CougConnect membership.</p>
+            <p>The account for <strong>{safe_email}</strong> doesn't have an active CougConnect membership.</p>
             <p><a href="https://cougconnect.com/become-a-subscriber/" style="color:#3b82f6;">Subscribe here</a>
                to get access.</p>
         """)
