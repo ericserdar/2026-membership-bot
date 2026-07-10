@@ -55,15 +55,26 @@ ROLE_IDS = {
     "unsubscribed": int(os.getenv("DISCORD_ROLE_UNSUBSCRIBED_ID", "0")),
 }
 
+GENERAL_CHANNEL_ID = int(os.getenv("DISCORD_GENERAL_CHANNEL_ID", "1050165331894751314"))
+
 FAQ_PATH = os.path.join(os.path.dirname(__file__), "faq.json")
+SCHEDULE_PATH = os.path.join(os.path.dirname(__file__), "schedule.json")
+SPONSORS_PATH = os.path.join(os.path.dirname(__file__), "sponsors.json")
+
+UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nudge
+WINBACK_DAYS = 30
 
 
-def load_faq() -> list[dict]:
+def _load_json(path: str) -> list[dict]:
     try:
-        with open(FAQ_PATH) as f:
+        with open(path) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
+
+
+def load_faq() -> list[dict]:
+    return _load_json(FAQ_PATH)
 
 
 # ── Bot class ──────────────────────────────────────────────────────────────────
@@ -87,6 +98,12 @@ class CougConnectBot(commands.Bot):
         self.daily_report_task.start()
         self.backup_db_task.start()
         self.expiry_notice_task.start()
+        self.winback_task.start()
+        self.milestone_task.start()
+        self.upgrade_nudge_task.start()
+        self.sponsor_spotlight_task.start()
+        self.weekly_digest_task.start()
+        self.gameday_thread_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -287,6 +304,202 @@ class CougConnectBot(commands.Bot):
 
     @expiry_notice_task.before_loop
     async def before_expiry_notice(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=17, minute=0, tzinfo=datetime.timezone.utc))  # ~10am MT
+    async def winback_task(self):
+        """DM members 30 days after their downgrade to unsubscribed (once per downgrade)."""
+        for row in db.get_downgrades_days_ago(WINBACK_DAYS):
+            record = db.get_member_by_discord(row["discord_id"])
+            if not record or record["tier"] != "unsubscribed":
+                continue  # re-subscribed since, or unlinked
+            if db.notice_sent("winback_notices", row["discord_id"], row["changed_at"]):
+                continue
+            try:
+                user = await bot.fetch_user(int(row["discord_id"]))
+                await user.send(
+                    "👋 It's been a month since your CougConnect membership ended — Cougar "
+                    "Nation isn't the same without you.\n\n"
+                    "We've kept the insider reports, interviews, and game breakdowns rolling. "
+                    "Rejoin anytime at https://cougconnect.com/become-a-subscriber/ and your "
+                    "Discord role comes right back with the **Re-sync My Role** button. 🏈"
+                )
+                db.record_notice("winback_notices", row["discord_id"], row["changed_at"])
+                log.info(f"Win-back DM sent to discord_id={row['discord_id']}")
+            except Exception as e:
+                log.info(f"Win-back DM failed for discord_id={row['discord_id']}: {e}")
+            await asyncio.sleep(2)
+
+    @winback_task.before_loop
+    async def before_winback(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=15, minute=0, tzinfo=datetime.timezone.utc))  # ~9am MT
+    async def milestone_task(self):
+        """Celebrate membership anniversaries in the general channel."""
+        channel = self.get_channel(GENERAL_CHANNEL_ID)
+        if not channel:
+            return
+        today = dt.now(timezone.utc).date()
+        for record in db.get_all_members():
+            if record["tier"] not in ("gold", "silver", "insider") or not record["linked_at"]:
+                continue
+            try:
+                linked = dt.fromisoformat(record["linked_at"]).date()
+            except ValueError:
+                continue
+            if (linked.month, linked.day) != (today.month, today.day):
+                continue
+            years = today.year - linked.year
+            if years < 1 or db.notice_sent("milestone_notices", record["discord_id"], years):
+                continue
+            label = "1 year" if years == 1 else f"{years} years"
+            try:
+                await channel.send(
+                    f"🎉 Shoutout to <@{record['discord_id']}> — **{label}** as a CougConnect "
+                    f"**{tier_label(record['tier'])}** member today! Thanks for backing the Cougs with us. 🏈"
+                )
+                db.record_notice("milestone_notices", record["discord_id"], years)
+            except Exception as e:
+                log.error(f"Milestone post failed for discord_id={record['discord_id']}: {e}")
+            await asyncio.sleep(2)
+
+    @milestone_task.before_loop
+    async def before_milestone(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=17, minute=30, tzinfo=datetime.timezone.utc))  # ~10:30am MT
+    async def upgrade_nudge_task(self):
+        """One-time DM to Insiders who've been members 5+ months about upgrading."""
+        cutoff = dt.now(timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=UPGRADE_NUDGE_DAYS)
+        for record in db.get_all_members():
+            if record["tier"] != "insider" or not record["linked_at"]:
+                continue
+            if db.upgrade_nudge_sent(record["discord_id"]):
+                continue
+            try:
+                linked = dt.fromisoformat(record["linked_at"])
+            except ValueError:
+                continue
+            if linked > cutoff:
+                continue
+            try:
+                user = await bot.fetch_user(int(record["discord_id"]))
+                await user.send(
+                    "👋 You've been part of CougConnect for 5 months now — thanks for riding with us!\n\n"
+                    "If you're enjoying the community, **Silver** and **Gold** unlock the insider "
+                    "practice reports, recruiting intel, AMAs, and voice chats with players.\n\n"
+                    "Upgrade anytime at https://cougconnect.com/account/ — your Discord role "
+                    "updates automatically. 🏈"
+                )
+                db.record_upgrade_nudge(record["discord_id"])
+                log.info(f"Upgrade nudge sent to discord_id={record['discord_id']}")
+            except Exception as e:
+                log.info(f"Upgrade nudge failed for discord_id={record['discord_id']}: {e}")
+            await asyncio.sleep(2)
+
+    @upgrade_nudge_task.before_loop
+    async def before_upgrade_nudge(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc))  # ~10am MT
+    async def sponsor_spotlight_task(self):
+        """Weekly sponsor spotlight in the general channel (Wednesdays, rotating)."""
+        if dt.now(timezone.utc).weekday() != 2:  # Wednesday
+            return
+        sponsors = _load_json(SPONSORS_PATH)
+        channel = self.get_channel(GENERAL_CHANNEL_ID)
+        if not sponsors or not channel:
+            return
+        sponsor = sponsors[dt.now(timezone.utc).isocalendar().week % len(sponsors)]
+        embed = discord.Embed(
+            title=f"🤝 Sponsor Spotlight: {sponsor['name']}",
+            description=sponsor.get("blurb", ""),
+            color=discord.Color.blue(),
+        )
+        if sponsor.get("url"):
+            embed.add_field(name="Learn more", value=sponsor["url"], inline=False)
+        embed.set_footer(text="CougConnect sponsors keep this community running — show them some love!")
+        try:
+            await channel.send(embed=embed)
+            log.info(f"Sponsor spotlight posted: {sponsor['name']}")
+        except Exception as e:
+            log.error(f"Sponsor spotlight failed: {e}")
+
+    @sponsor_spotlight_task.before_loop
+    async def before_sponsor_spotlight(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=14, minute=0, tzinfo=datetime.timezone.utc))  # ~8am MT
+    async def weekly_digest_task(self):
+        """Monday stats digest with week-over-week deltas, posted to admin log."""
+        if dt.now(timezone.utc).weekday() != 0:  # Monday
+            return
+        stats = db.get_stats()
+        prev = db.get_previous_snapshot()
+        db.save_stats_snapshot(stats)
+
+        def delta(key):
+            if not prev:
+                return ""
+            d = stats[key] - prev[key]
+            return f" ({'+' if d >= 0 else ''}{d})" if d != 0 else " (—)"
+
+        new_links = [c for c in db.get_tier_changes_since(hours=168)
+                     if c["old_tier"] in ("none", None, "") and c["new_tier"] != "unsubscribed"]
+        cancels = [c for c in db.get_tier_changes_since(hours=168) if c["new_tier"] == "unsubscribed"]
+
+        lines = [
+            "**📈 CougConnect Weekly Digest**",
+            f"🥇 Gold: **{stats['gold']}**{delta('gold')}  |  🥈 Silver: **{stats['silver']}**{delta('silver')}  |  "
+            f"🔵 Insider: **{stats['insider']}**{delta('insider')}",
+            f"Total verified: **{stats['total']}**{delta('total')}  |  Unsubscribed: {stats['unsubscribed']}{delta('unsubscribed')}",
+            f"This week: 🔗 {len(new_links)} new verification(s), ❌ {len(cancels)} cancellation(s)",
+        ]
+        if prev:
+            lines.append(f"_Compared to {prev['snapshot_date']}_")
+        await post_admin_log("\n".join(lines))
+
+    @weekly_digest_task.before_loop
+    async def before_weekly_digest(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=14, minute=30, tzinfo=datetime.timezone.utc))  # ~8:30am MT
+    async def gameday_thread_task(self):
+        """Open a game-day thread in the general channel on BYU game days."""
+        today = dt.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+        games = [g for g in _load_json(SCHEDULE_PATH) if g["date"] == today]
+        if not games:
+            return
+        channel = self.get_channel(GENERAL_CHANNEL_ID)
+        if not channel:
+            return
+        for game in games:
+            vs_at = "vs" if game.get("home") else "at"
+            emoji = "🏈" if game.get("sport") == "football" else "🏀"
+            name = f"{emoji} BYU {vs_at} {game['opponent']} — Game Thread"
+            try:
+                thread = await channel.create_thread(
+                    name=name,
+                    type=discord.ChannelType.public_thread,
+                    auto_archive_duration=1440,
+                )
+                details = []
+                if game.get("time"):
+                    details.append(f"🕐 Kickoff: **{game['time']}**")
+                if game.get("tv"):
+                    details.append(f"📺 Watch on **{game['tv']}**")
+                await thread.send(
+                    f"**It's game day, Cougar Nation!** BYU {vs_at} **{game['opponent']}** 🎉\n"
+                    + ("\n".join(details) + "\n" if details else "")
+                    + "\nDrop your predictions and talk the game right here. Go Cougs!"
+                )
+                log.info(f"Game-day thread created: {name}")
+            except Exception as e:
+                log.error(f"Game-day thread failed: {e}")
+
+    @gameday_thread_task.before_loop
+    async def before_gameday(self):
         await self.wait_until_ready()
 
 
@@ -754,6 +967,38 @@ async def stats(interaction: discord.Interaction):
     embed.add_field(name="🔵 Insider", value=str(s["insider"]), inline=True)
     embed.add_field(name="❌ Unsubscribed", value=str(s["unsubscribed"]), inline=True)
     embed.set_footer(text=f"As of {dt.now(timezone.utc).strftime('%m/%d/%Y %H:%M')} UTC")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="churn", description="Churn analysis — cancellations vs new members over recent months")
+@app_commands.default_permissions(administrator=True)
+async def churn(interaction: discord.Interaction):
+    data = db.get_churn_data(months=6)
+    if not data["monthly"]:
+        await interaction.response.send_message("No tier-change data recorded yet.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="📉 Churn Report — Last 6 Months", color=discord.Color.red())
+
+    month_lines = []
+    for m in data["monthly"]:
+        net = m["new_links"] - m["cancels"]
+        month_lines.append(f"`{m['month']}` — 🔗 {m['new_links']} new, ❌ {m['cancels']} cancelled, net **{'+' if net >= 0 else ''}{net}**")
+    embed.add_field(name="By Month", value="\n".join(month_lines), inline=False)
+
+    if data["cancels_by_tier"]:
+        tier_lines = [f"**{tier_label(t)}**: {n}" for t, n in sorted(data["cancels_by_tier"].items())]
+        embed.add_field(name="Cancellations by Tier", value="  |  ".join(tier_lines), inline=False)
+
+    if data["avg_days_before_cancel"] is not None:
+        months_avg = data["avg_days_before_cancel"] / 30.4
+        embed.add_field(
+            name="Avg Membership Length Before Cancelling",
+            value=f"**{data['avg_days_before_cancel']:.0f} days** (~{months_avg:.1f} months, n={data['churn_sample_size']})",
+            inline=False,
+        )
+
+    embed.set_footer(text="Source: tier_changes audit log · new = first verification, cancelled = downgrade to Unsubscribed")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

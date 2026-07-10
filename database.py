@@ -52,6 +52,38 @@ def init_db():
                 PRIMARY KEY (discord_id, expires_at)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS winback_notices (
+                discord_id  TEXT,
+                changed_at  TEXT,
+                notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, changed_at)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS milestone_notices (
+                discord_id  TEXT,
+                years       INTEGER,
+                notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, years)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS stats_snapshots (
+                snapshot_date TEXT PRIMARY KEY,
+                gold          INTEGER,
+                silver        INTEGER,
+                insider       INTEGER,
+                unsubscribed  INTEGER,
+                total         INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS upgrade_nudges (
+                discord_id  TEXT PRIMARY KEY,
+                notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
 
@@ -236,6 +268,122 @@ def record_expiry_notice(discord_id: str, expires_at: str):
             (discord_id, expires_at),
         )
         conn.commit()
+
+
+# ── Win-back / milestone / upgrade-nudge tracking ────────────────────────────
+
+def get_downgrades_days_ago(days: int) -> list[dict]:
+    """Tier changes to unsubscribed that happened `days` to `days+1` days ago."""
+    upper = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    lower = (datetime.utcnow() - timedelta(days=days + 1)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT discord_id, mp_email, old_tier, changed_at FROM tier_changes "
+            "WHERE new_tier = 'unsubscribed' AND changed_at >= ? AND changed_at < ?",
+            (lower, upper),
+        ).fetchall()
+    return [dict(zip(["discord_id", "mp_email", "old_tier", "changed_at"], row)) for row in rows]
+
+
+def notice_sent(table: str, discord_id: str, key) -> bool:
+    assert table in ("winback_notices", "milestone_notices")
+    col = "changed_at" if table == "winback_notices" else "years"
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            f"SELECT 1 FROM {table} WHERE discord_id = ? AND {col} = ?",
+            (discord_id, key),
+        ).fetchone()
+    return row is not None
+
+
+def record_notice(table: str, discord_id: str, key):
+    assert table in ("winback_notices", "milestone_notices")
+    col = "changed_at" if table == "winback_notices" else "years"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            f"INSERT OR IGNORE INTO {table} (discord_id, {col}) VALUES (?, ?)",
+            (discord_id, key),
+        )
+        conn.commit()
+
+
+def upgrade_nudge_sent(discord_id: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT 1 FROM upgrade_nudges WHERE discord_id = ?", (discord_id,)).fetchone()
+    return row is not None
+
+
+def record_upgrade_nudge(discord_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR IGNORE INTO upgrade_nudges (discord_id) VALUES (?)", (discord_id,))
+        conn.commit()
+
+
+# ── Weekly stats snapshots ────────────────────────────────────────────────────
+
+def save_stats_snapshot(stats: dict):
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO stats_snapshots (snapshot_date, gold, silver, insider, unsubscribed, total)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (today, stats["gold"], stats["silver"], stats["insider"], stats["unsubscribed"], stats["total"]))
+        conn.commit()
+
+
+def get_previous_snapshot() -> dict | None:
+    """Most recent snapshot before today."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT snapshot_date, gold, silver, insider, unsubscribed, total "
+            "FROM stats_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1",
+            (today,),
+        ).fetchone()
+    if not row:
+        return None
+    return dict(zip(["snapshot_date", "gold", "silver", "insider", "unsubscribed", "total"], row))
+
+
+# ── Churn analysis ────────────────────────────────────────────────────────────
+
+def get_churn_data(months: int = 6) -> dict:
+    """Monthly new-link and cancellation counts, plus membership length for churned members."""
+    cutoff = (datetime.utcnow() - timedelta(days=months * 31)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        monthly = conn.execute("""
+            SELECT substr(changed_at, 1, 7) AS month,
+                   SUM(CASE WHEN new_tier = 'unsubscribed' THEN 1 ELSE 0 END) AS cancels,
+                   SUM(CASE WHEN old_tier IN ('none', '') OR old_tier IS NULL THEN 1 ELSE 0 END) AS new_links
+            FROM tier_changes WHERE changed_at >= ?
+            GROUP BY month ORDER BY month
+        """, (cutoff,)).fetchall()
+        by_tier = conn.execute("""
+            SELECT old_tier, COUNT(*) FROM tier_changes
+            WHERE new_tier = 'unsubscribed' AND changed_at >= ? AND old_tier IN ('gold', 'silver', 'insider')
+            GROUP BY old_tier
+        """, (cutoff,)).fetchall()
+        lengths = conn.execute("""
+            SELECT tc.changed_at, ml.linked_at FROM tier_changes tc
+            JOIN member_links ml ON ml.discord_id = tc.discord_id
+            WHERE tc.new_tier = 'unsubscribed' AND tc.changed_at >= ? AND ml.linked_at IS NOT NULL
+        """, (cutoff,)).fetchall()
+
+    days = []
+    for changed_at, linked_at in lengths:
+        try:
+            delta = datetime.fromisoformat(changed_at) - datetime.fromisoformat(linked_at)
+            if delta.days >= 0:
+                days.append(delta.days)
+        except ValueError:
+            continue
+
+    return {
+        "monthly": [dict(zip(["month", "cancels", "new_links"], row)) for row in monthly],
+        "cancels_by_tier": dict(by_tier),
+        "avg_days_before_cancel": (sum(days) / len(days)) if days else None,
+        "churn_sample_size": len(days),
+    }
 
 
 def get_stats() -> dict:
