@@ -16,6 +16,8 @@ import html
 import json
 import logging
 import os
+import sqlite3
+import sys
 import datetime
 from datetime import datetime as dt, timezone
 
@@ -30,7 +32,8 @@ import memberpress as mp
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# stdout so Railway doesn't tag every INFO line as an error (stderr = error there)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
 log = logging.getLogger("cougconnect")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -82,6 +85,8 @@ class CougConnectBot(commands.Bot):
         self.cleanup_tokens_task.start()
         self.sync_all_members_task.start()
         self.daily_report_task.start()
+        self.backup_db_task.start()
+        self.expiry_notice_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -188,10 +193,100 @@ class CougConnectBot(commands.Bot):
             for c in needs_attention:
                 lines.append(f"• <@{c['discord_id']}> (`{c['mp_email']}`) — skipped downgrade, use `/sync-member` if confirmed cancelled")
 
+        unlinked_lines = await self._check_unlinked_members()
+        if unlinked_lines:
+            lines.append("\n💸 **Paying but not in Discord:**")
+            lines.extend(unlinked_lines)
+            lines.append("_These members subscribed on the site but never verified in Discord — worth a nudge email._")
+
         await post_admin_log("\n".join(lines))
+
+    async def _check_unlinked_members(self) -> list[str]:
+        """Look up webhook-seen MemberPress accounts with no Discord link; return report lines for active payers."""
+        report = []
+        for mp_id in db.get_unlinked_ids():
+            if db.get_member_by_mp_id(mp_id):
+                db.remove_unlinked(mp_id)  # linked since we recorded them
+                continue
+            try:
+                member = await mp.get_member_by_id(mp_id)
+                if not member:
+                    continue
+                tier = mp.resolve_tier(mp.active_ids_from_member_object(member))
+                if tier == "unsubscribed":
+                    db.remove_unlinked(mp_id)  # no longer paying, stop reporting
+                    continue
+                report.append(f"• `{member.get('email', f'mp_member_id={mp_id}')}` — **{tier_label(tier)}**")
+            except Exception as e:
+                log.error(f"Unlinked-member check failed for mp_member_id={mp_id}: {e}")
+            await asyncio.sleep(2)
+        return report
 
     @daily_report_task.before_loop
     async def before_daily_report(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=9, minute=0, tzinfo=datetime.timezone.utc))  # 2am MST (UTC-7)
+    async def backup_db_task(self):
+        """Nightly SQLite backup posted to the admin log channel."""
+        channel = self.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if not channel:
+            return
+        backup_path = "/tmp/cougconnect-backup.db"
+        try:
+            src = sqlite3.connect(db.DB_PATH)
+            dest = sqlite3.connect(backup_path)
+            src.backup(dest)
+            dest.close()
+            src.close()
+            stamp = dt.now(timezone.utc).strftime("%Y-%m-%d")
+            await channel.send(
+                f"🗄️ Nightly database backup ({stamp})",
+                file=discord.File(backup_path, filename=f"cougconnect-{stamp}.db"),
+            )
+        except Exception as e:
+            log.error(f"DB backup failed: {e}")
+            await post_admin_log(f"❌ **Nightly DB backup failed:** `{e}`")
+        finally:
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+
+    @backup_db_task.before_loop
+    async def before_backup(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc))  # 9am MST (UTC-7)
+    async def expiry_notice_task(self):
+        """DM members whose cancelled subscription ends within 3 days (once per expiry date)."""
+        members = [m for m in db.get_all_members() if m["tier"] in ("gold", "silver", "insider")]
+        for record in members:
+            try:
+                mp_data = await mp.get_member_by_id(record["mp_member_id"])
+                if not mp_data:
+                    continue
+                sub = mp.parse_subscription_status(mp_data)
+                expires_at = sub.get("expires_at")
+                if not expires_at or not sub["status"].startswith("Ending on"):
+                    continue
+                days_left = (dt.strptime(expires_at, "%m/%d/%Y").date() - dt.now(timezone.utc).date()).days
+                if not (0 <= days_left <= 3):
+                    continue
+                if db.expiry_notice_sent(record["discord_id"], expires_at):
+                    continue
+                user = await bot.fetch_user(int(record["discord_id"]))
+                await user.send(
+                    f"👋 Heads up — your CougConnect **{tier_label(record['tier'])}** membership "
+                    f"ends on **{expires_at}**.\n\n"
+                    "Renew at https://cougconnect.com/account/ to keep your access and Discord role. 🏈"
+                )
+                db.record_expiry_notice(record["discord_id"], expires_at)
+                log.info(f"Expiry notice sent to discord_id={record['discord_id']} (expires {expires_at})")
+            except Exception as e:
+                log.error(f"Expiry notice error for discord_id={record['discord_id']}: {e}")
+            await asyncio.sleep(2)
+
+    @expiry_notice_task.before_loop
+    async def before_expiry_notice(self):
         await self.wait_until_ready()
 
 
@@ -280,6 +375,24 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
 
 def tier_label(tier: str) -> str:
     return {"gold": "Gold", "silver": "Silver", "insider": "Insider", "unsubscribed": "Unsubscribed"}.get(tier, tier.title())
+
+
+async def send_welcome_dm(discord_id: int, tier: str):
+    """Welcome DM after a successful verification, with a tier-specific channel guide."""
+    tier_perks = {
+        "gold": "As a **Gold** member you have full access — insider reports, the Gold lounge, AMAs, and voice chats.",
+        "silver": "As a **Silver** member you get insider reports and the Silver channels, plus community events.",
+        "insider": "As an **Insider** you have access to the community channels and insider discussions.",
+    }
+    try:
+        user = await bot.fetch_user(discord_id)
+        await user.send(
+            f"🎉 Welcome to CougConnect! Your **{tier_label(tier)}** role is set.\n\n"
+            f"{tier_perks.get(tier, '')}\n\n"
+            "Introduce yourself in the community channel and jump into the conversation. Go Cougs! 🏈"
+        )
+    except Exception:
+        log.info(f"Could not DM welcome to discord_id={discord_id} (DMs likely closed)")
 
 
 def add_active_subscriptions_field(embed: discord.Embed, mp_member: dict | None):
@@ -427,6 +540,7 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
     old_tier = existing["tier"] if existing else "none"
     db.log_tier_change(str(user.id), email, old_tier, tier, reason="link-member")
     db.upsert_member(str(user.id), mp_id, email, tier)
+    db.remove_unlinked(mp_id)
     success = await assign_role(user.id, tier)
 
     if success:
@@ -783,6 +897,7 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
         """)
 
     db.upsert_member(discord_id, mp_id, email, tier)
+    db.remove_unlinked(mp_id)
     success = await assign_role(int(discord_id), tier)
 
     if not success:
@@ -794,6 +909,7 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
         """)
 
     log.info(f"Verified discord_id={discord_id} email={email} tier={tier}")
+    asyncio.create_task(send_welcome_dm(int(discord_id), tier))
     tier_display = tier_label(tier)
     return _page("Verified!", f"""
         <h1>✅ You're Verified!</h1>
@@ -802,11 +918,83 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     """)
 
 
+INACTIVE_EVENTS = {
+    "subscription-expired",
+    "member-account-expired",
+    # NOTE: subscription-stopped and subscription-cancelled are NOT here.
+    # Those fire when auto-renewal is cancelled but access continues until the
+    # paid period ends. We re-fetch from MemberPress to get the real current tier
+    # rather than immediately demoting. The member will be downgraded when
+    # subscription-expired fires at the end of their paid period.
+}
+REACTIVATE_EVENTS = {
+    "subscription-resumed", "subscription-renewed", "subscription-upgraded",
+    "subscription-created", "transaction-completed",
+    "member-signup-completed", "subscription-paused",
+    "subscription-stopped", "subscription-cancelled",
+}
+
+# MemberPress fires the same event in bursts; drop repeats seen within this window
+WEBHOOK_DEDUPE_SECONDS = 30
+_recent_webhooks: dict[tuple[int, str], float] = {}
+
+# Reactivation lookups retry on this schedule before giving up
+REACTIVATE_RETRY_DELAYS = [15, 60, 300]
+
+
+async def process_webhook_event(event: str, mp_member_id: int, record: dict):
+    """Apply a MemberPress webhook in the background (handler already returned 200)."""
+    discord_id = int(record["discord_id"])
+
+    if event in INACTIVE_EVENTS:
+        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"webhook:{event}")
+        db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], "unsubscribed")
+        await assign_role(discord_id, "unsubscribed")
+        log.info(f"Set discord_id={discord_id} to unsubscribed via event={event}")
+        try:
+            user = await bot.fetch_user(discord_id)
+            await user.send(
+                "Your CougConnect membership has expired or been cancelled. "
+                "Renew at https://cougconnect.com to restore your access. 🏈"
+            )
+        except Exception:
+            pass
+
+    elif event in REACTIVATE_EVENTS:
+        # Webhooks fire before MemberPress commits the subscription, so retry
+        # with backoff until the API reflects an active membership.
+        tier = "unsubscribed"
+        for attempt, delay in enumerate(REACTIVATE_RETRY_DELAYS, 1):
+            await asyncio.sleep(delay)
+            active_ids = await mp.get_active_membership_ids(mp_member_id, record["mp_email"])
+            tier = mp.resolve_tier(active_ids)
+            if tier != "unsubscribed":
+                break
+            log.info(f"Webhook {event} for discord_id={discord_id}: still unsubscribed after attempt {attempt}/{len(REACTIVATE_RETRY_DELAYS)}")
+
+        if tier == "unsubscribed":
+            log.warning(f"Webhook {event} for discord_id={discord_id} resolved to unsubscribed after all retries.")
+            await post_admin_log(
+                f"⚠️ **Webhook race condition** — <@{discord_id}> (`{record['mp_email']}`)\n"
+                f"Event `{event}` fired but MemberPress still shows no active membership after "
+                f"{len(REACTIVATE_RETRY_DELAYS)} retries over ~6 minutes.\n"
+                f"Use `/sync-member` to retry manually."
+            )
+            return
+        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], tier, reason=f"webhook:{event}")
+        db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], tier)
+        await assign_role(discord_id, tier)
+        log.info(f"Re-activated discord_id={discord_id} as tier={tier} via event={event}")
+
+
 async def handle_webhook(request: web.Request) -> web.Response:
     """
     MemberPress subscription webhook.
     Fired on: subscription-expired, subscription-cancelled, subscription-stopped,
               subscription-resumed, subscription-upgraded, etc.
+
+    Validates and returns 200 immediately; the actual processing (which may wait
+    minutes for MemberPress to commit) runs as a background task.
     """
     body = await request.read()
 
@@ -836,67 +1024,20 @@ async def handle_webhook(request: web.Request) -> web.Response:
     mp_member_id = int(mp_member_id)
     record = db.get_member_by_mp_id(mp_member_id)
     if not record:
-        log.info(f"Webhook for unknown mp_member_id={mp_member_id}, ignoring.")
+        db.record_unlinked(mp_member_id)
+        log.info(f"Webhook for unlinked mp_member_id={mp_member_id} — recorded for daily report.")
         return web.json_response({"status": "ignored — member not linked"})
 
-    discord_id = int(record["discord_id"])
+    now = asyncio.get_event_loop().time()
+    key = (mp_member_id, event)
+    if now - _recent_webhooks.get(key, 0) < WEBHOOK_DEDUPE_SECONDS:
+        return web.json_response({"status": "ignored — duplicate"})
+    _recent_webhooks[key] = now
+    for k in [k for k, t in _recent_webhooks.items() if now - t > WEBHOOK_DEDUPE_SECONDS]:
+        del _recent_webhooks[k]
 
-    inactive_events = {
-        "subscription-expired",
-        "member-account-expired",
-        # NOTE: subscription-stopped and subscription-cancelled are NOT here.
-        # Those fire when auto-renewal is cancelled but access continues until the
-        # paid period ends. We re-fetch from MemberPress to get the real current tier
-        # rather than immediately demoting. The member will be downgraded when
-        # subscription-expired fires at the end of their paid period.
-    }
-    reactivate_events = {
-        "subscription-resumed", "subscription-renewed", "subscription-upgraded",
-        "subscription-created", "transaction-completed",
-        "member-signup-completed", "subscription-paused",
-        "subscription-stopped", "subscription-cancelled",
-    }
-
-    if event in inactive_events:
-        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"webhook:{event}")
-        db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], "unsubscribed")
-        await assign_role(discord_id, "unsubscribed")
-        log.info(f"Set discord_id={discord_id} to unsubscribed via event={event}")
-
-        # DM the member
-        try:
-            user = await bot.fetch_user(discord_id)
-            await user.send(
-                "Your CougConnect membership has expired or been cancelled. "
-                "Renew at https://cougconnect.com to restore your access. 🏈"
-            )
-        except Exception:
-            pass
-
-    elif event in reactivate_events:
-        # Wait for MemberPress to fully commit the subscription before querying.
-        # Webhooks fire immediately on payment but the subscription may not be
-        # in the API yet — this prevents incorrectly resolving to Unsubscribed.
-        await asyncio.sleep(15)
-        active_ids = await mp.get_active_membership_ids(mp_member_id, record["mp_email"])
-        tier = mp.resolve_tier(active_ids)
-        if tier == "unsubscribed":
-            log.warning(
-                f"Webhook {event} for discord_id={discord_id} resolved to unsubscribed — "
-                f"MemberPress may still be processing. Skipping update; use /sync-member to retry."
-            )
-            await post_admin_log(
-                f"⚠️ **Webhook race condition** — <@{discord_id}> (`{record['mp_email']}`)\n"
-                f"Event `{event}` fired but MemberPress API returned no active membership.\n"
-                f"Use `/sync-member` in a few minutes to retry."
-            )
-            return web.json_response({"status": "skipped — unsubscribed after reactivate event"})
-        db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], tier, reason=f"webhook:{event}")
-        db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], tier)
-        await assign_role(discord_id, tier)
-        log.info(f"Re-activated discord_id={discord_id} as tier={tier} via event={event}")
-
-    return web.json_response({"status": "ok"})
+    asyncio.create_task(process_webhook_event(event, mp_member_id, record))
+    return web.json_response({"status": "accepted"})
 
 
 async def handle_admin_import(request: web.Request) -> web.Response:

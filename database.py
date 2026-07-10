@@ -37,6 +37,21 @@ def init_db():
                 reason       TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS unlinked_members (
+                mp_member_id INTEGER PRIMARY KEY,
+                first_seen   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS expiry_notices (
+                discord_id  TEXT,
+                expires_at  TEXT,
+                notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, expires_at)
+            )
+        """)
         conn.commit()
 
 
@@ -178,6 +193,49 @@ def get_all_members() -> list[dict]:
             "FROM member_links"
         ).fetchall()
     return [dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row)) for row in rows]
+
+
+# ── Unlinked paying members (webhooks from MemberPress accounts with no Discord link) ──
+
+def record_unlinked(mp_member_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO unlinked_members (mp_member_id) VALUES (?)
+            ON CONFLICT(mp_member_id) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+        """, (mp_member_id,))
+        conn.commit()
+
+
+def get_unlinked_ids() -> list[int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT mp_member_id FROM unlinked_members ORDER BY last_seen DESC").fetchall()
+    return [r[0] for r in rows]
+
+
+def remove_unlinked(mp_member_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM unlinked_members WHERE mp_member_id = ?", (mp_member_id,))
+        conn.commit()
+
+
+# ── Expiry notices (one DM per discord_id + expiry date) ─────────────────────
+
+def expiry_notice_sent(discord_id: str, expires_at: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM expiry_notices WHERE discord_id = ? AND expires_at = ?",
+            (discord_id, expires_at),
+        ).fetchone()
+    return row is not None
+
+
+def record_expiry_notice(discord_id: str, expires_at: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO expiry_notices (discord_id, expires_at) VALUES (?, ?)",
+            (discord_id, expires_at),
+        )
+        conn.commit()
 
 
 def get_stats() -> dict:

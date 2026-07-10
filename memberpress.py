@@ -54,13 +54,12 @@ async def get_member_by_email(email: str) -> dict | None:
             headers={"MEMBERPRESS-API-KEY": MP_KEY},
             params={"search": email, "per_page": 5},
         ) as resp:
-            log.info(f"MemberPress API /members status={resp.status} for email={email}")
             if resp.status != 200:
                 body = await resp.text()
-                log.error(f"MemberPress API error: {body}")
+                log.error(f"MemberPress API error (status={resp.status}): {body}")
                 return None
             data = await resp.json()
-            log.info(f"MemberPress returned {len(data)} result(s): {[m.get('email') for m in data]}")
+            log.debug(f"MemberPress /members search for {email}: {len(data)} result(s)")
     for member in data:
         if member.get("email", "").lower() == email.lower():
             return member
@@ -87,7 +86,7 @@ async def get_active_membership_ids(mp_member_id: int, mp_email: str = "") -> li
     import logging
     log = logging.getLogger("cougconnect")
     ids = await _get_active_ids_from_member(mp_member_id, mp_email)
-    log.info(f"Active membership IDs for mp_member_id={mp_member_id}: {ids} | gold={_GOLD_IDS} silver={_SILVER_IDS} insider={_INSIDER_IDS}")
+    log.debug(f"Active membership IDs for mp_member_id={mp_member_id}: {ids}")
     return ids
 
 
@@ -96,12 +95,12 @@ def active_ids_from_member_object(member: dict) -> list[int]:
     import logging
     log = logging.getLogger("cougconnect")
     active_memberships = member.get("active_memberships", [])
-    log.info(f"active_memberships from member object: {active_memberships}")
     ids = []
     for m in active_memberships:
         mid = m.get("id") if isinstance(m, dict) else m
         if mid:
             ids.append(int(mid))
+    log.debug(f"active membership IDs from member object: {ids}")
     return ids
 
 
