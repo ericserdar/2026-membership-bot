@@ -62,6 +62,7 @@ SCHEDULE_PATH = os.path.join(os.path.dirname(__file__), "schedule.json")
 SPONSORS_PATH = os.path.join(os.path.dirname(__file__), "sponsors.json")
 
 UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nudge
+UPGRADE_NUDGE_DAILY_CAP = 50  # spread large cohorts over multiple days
 WINBACK_DAYS = 30
 
 
@@ -372,7 +373,11 @@ class CougConnectBot(commands.Bot):
     async def upgrade_nudge_task(self):
         """One-time DM to Insiders who've been members 5+ months about upgrading."""
         cutoff = dt.now(timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=UPGRADE_NUDGE_DAYS)
+        sent = 0
         for record in db.get_all_members():
+            if sent >= UPGRADE_NUDGE_DAILY_CAP:
+                log.info(f"Upgrade nudge daily cap ({UPGRADE_NUDGE_DAILY_CAP}) reached — resuming tomorrow.")
+                break
             if record["tier"] != "insider" or not record["linked_at"]:
                 continue
             if db.upgrade_nudge_sent(record["discord_id"]):
@@ -387,15 +392,19 @@ class CougConnectBot(commands.Bot):
                 user = await bot.fetch_user(int(record["discord_id"]))
                 await user.send(
                     "👋 You've been part of CougConnect for 5 months now — thanks for riding with us!\n\n"
-                    "If you're enjoying the community, **Silver** and **Gold** unlock the insider "
-                    "practice reports, recruiting intel, AMAs, and voice chats with players.\n\n"
+                    "Ready for the full experience? **Silver** and **Gold** members get the "
+                    "CougConnect swag bag — exclusive gear you can't buy anywhere — and Gold "
+                    "includes a custom jersey. Plus insider reports, AMAs, and voice chats with players.\n\n"
                     "Upgrade anytime at https://cougconnect.com/account/ — your Discord role "
                     "updates automatically. 🏈"
                 )
                 db.record_upgrade_nudge(record["discord_id"])
-                log.info(f"Upgrade nudge sent to discord_id={record['discord_id']}")
+                sent += 1
+                log.info(f"Upgrade nudge sent to discord_id={record['discord_id']} ({sent}/{UPGRADE_NUDGE_DAILY_CAP})")
             except Exception as e:
-                log.info(f"Upgrade nudge failed for discord_id={record['discord_id']}: {e}")
+                # Mark attempted so closed-DM members aren't retried daily forever
+                db.record_upgrade_nudge(record["discord_id"])
+                log.info(f"Upgrade nudge failed for discord_id={record['discord_id']} (marked attempted): {e}")
             await asyncio.sleep(2)
 
     @upgrade_nudge_task.before_loop
@@ -417,11 +426,15 @@ class CougConnectBot(commands.Bot):
             description=sponsor.get("blurb", ""),
             color=discord.Color.blue(),
         )
-        if sponsor.get("url"):
-            embed.add_field(name="Learn more", value=sponsor["url"], inline=False)
         embed.set_footer(text="CougConnect sponsors keep this community running — show them some love!")
+        # Tag the sponsor in the message content (embed mentions don't ping)
+        content = None
+        if sponsor.get("email"):
+            record = db.get_member_by_email(sponsor["email"])
+            if record:
+                content = f"Say thanks to <@{record['discord_id']}>! 👏"
         try:
-            await channel.send(embed=embed)
+            await channel.send(content=content, embed=embed)
             log.info(f"Sponsor spotlight posted: {sponsor['name']}")
         except Exception as e:
             log.error(f"Sponsor spotlight failed: {e}")
