@@ -708,6 +708,23 @@ async def sync_all(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="pending-links", description="List paying MemberPress accounts not linked to Discord")
+@app_commands.default_permissions(manage_roles=True)
+async def pending_links(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    lines = await bot._check_unlinked_members()
+    if not lines:
+        await interaction.followup.send("✅ No unlinked paying members — everyone the bot has seen is verified.", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title="💸 Paying but not in Discord",
+        description="\n".join(lines),
+        color=discord.Color.orange(),
+    )
+    embed.set_footer(text="Seen via MemberPress webhooks · use /link-member to link manually")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="tier-history", description="Show recent tier changes")
 @app_commands.default_permissions(administrator=True)
 async def tier_history(interaction: discord.Interaction):
