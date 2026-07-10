@@ -47,6 +47,11 @@ PORT = int(os.getenv("PORT", "8080"))
 BOT_PUBLIC_URL = os.getenv("BOT_PUBLIC_URL", "http://localhost:8080")
 MP_WEBHOOK_SECRET = os.getenv("MEMBERPRESS_WEBHOOK_SECRET", "")
 BOT_VERIFY_SECRET = os.getenv("BOT_VERIFY_SECRET", "")
+# Random path segment authenticating webhooks (MemberPress can't sign reliably).
+# When set, webhooks POST to /webhook/<token>; bare /webhook stays active for the
+# transition unless DISABLE_LEGACY_WEBHOOK=1.
+WEBHOOK_URL_TOKEN = os.getenv("WEBHOOK_URL_TOKEN", "")
+DISABLE_LEGACY_WEBHOOK = os.getenv("DISABLE_LEGACY_WEBHOOK", "") == "1"
 
 ROLE_IDS = {
     "gold":         int(os.getenv("DISCORD_ROLE_GOLD_ID", "0")),
@@ -84,7 +89,8 @@ class CougConnectBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
-        super().__init__(command_prefix="!", intents=intents)
+        # Slash-commands only; when_mentioned avoids needing the message_content intent
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self._web_runner: web.AppRunner | None = None
 
     async def setup_hook(self):
@@ -1315,33 +1321,22 @@ async def handle_webhook(request: web.Request) -> web.Response:
     return web.json_response({"status": "accepted"})
 
 
-async def handle_admin_import(request: web.Request) -> web.Response:
-    """Temporary endpoint to bulk-import member records from the migration script."""
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
-    if data.get("secret") != BOT_VERIFY_SECRET:
-        return web.json_response({"error": "Unauthorized"}, status=403)
-    members = data.get("members", [])
-    imported = 0
-    skipped = 0
-    for m in members:
-        if db.get_member_by_discord(m["discord_id"]):
-            skipped += 1
-            continue
-        db.upsert_member(m["discord_id"], m["mp_member_id"], m["mp_email"], m["tier"])
-        imported += 1
-    log.info(f"Admin import: {imported} imported, {skipped} skipped")
-    return web.json_response({"imported": imported, "skipped": skipped})
+async def handle_legacy_webhook(request: web.Request) -> web.Response:
+    """Bare /webhook — kept during the move to the tokened URL, then disabled."""
+    if DISABLE_LEGACY_WEBHOOK:
+        return web.json_response({"error": "Gone — webhook URL has changed"}, status=410)
+    if WEBHOOK_URL_TOKEN:
+        log.warning("Webhook received on legacy /webhook path — update the MemberPress webhook URL to the tokened path.")
+    return await handle_webhook(request)
 
 
 async def start_web_server():
     app = web.Application(client_max_size=50*1024*1024)
     app.router.add_get("/verify-page", handle_verify_page_get)
     app.router.add_post("/verify-page", handle_verify_page_post)
-    app.router.add_post("/webhook", handle_webhook)
-    app.router.add_post("/admin/import", handle_admin_import)
+    app.router.add_post("/webhook", handle_legacy_webhook)
+    if WEBHOOK_URL_TOKEN:
+        app.router.add_post(f"/webhook/{WEBHOOK_URL_TOKEN}", handle_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
