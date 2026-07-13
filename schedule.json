@@ -1,5 +1,5 @@
 [
-  {"date": "2026-09-05", "sport": "football", "opponent": "Utah Tech", "home": true, "time": null, "tv": null},
+  {"date": "2026-09-05", "sport": "football", "opponent": "Utah Tech", "home": true, "time": "6:00 PM MT", "tv": "ESPN+"},
   {"date": "2026-09-12", "sport": "football", "opponent": "Arizona", "home": true, "time": "1:30 PM MT", "tv": "FOX"},
   {"date": "2026-09-19", "sport": "football", "opponent": "Colorado State", "home": false, "time": "5:30 PM MT", "tv": "CBS"},
   {"date": "2026-10-03", "sport": "football", "opponent": "TCU", "home": false, "time": null, "tv": null},
