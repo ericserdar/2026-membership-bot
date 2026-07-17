@@ -10,6 +10,7 @@ CougConnect Discord Membership Bot
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import html
@@ -21,6 +22,7 @@ import sys
 import datetime
 from datetime import datetime as dt, timezone
 
+import aiohttp
 import aiohttp.web as web
 import discord
 from discord import app_commands
@@ -52,6 +54,12 @@ BOT_VERIFY_SECRET = os.getenv("BOT_VERIFY_SECRET", "")
 # transition unless DISABLE_LEGACY_WEBHOOK=1.
 WEBHOOK_URL_TOKEN = os.getenv("WEBHOOK_URL_TOKEN", "")
 DISABLE_LEGACY_WEBHOOK = os.getenv("DISABLE_LEGACY_WEBHOOK", "") == "1"
+
+# Admin report emails (nightly DB backup + unverified-subscriber report).
+# From address must be a verified SendGrid sender.
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+REPORT_EMAIL_FROM = os.getenv("REPORT_EMAIL_FROM", "")
+REPORT_EMAIL_TO = os.getenv("REPORT_EMAIL_TO", "eric@serdarconsulting.com")
 
 ROLE_IDS = {
     "gold":         int(os.getenv("DISCORD_ROLE_GOLD_ID", "0")),
@@ -217,13 +225,19 @@ class CougConnectBot(commands.Bot):
             for c in needs_attention:
                 lines.append(f"• <@{c['discord_id']}> (`{c['mp_email']}`) — skipped downgrade, use `/sync-member` if confirmed cancelled")
 
+        await post_admin_log("\n".join(lines))
+
+        # Unverified subscribers go to email only, not Discord.
         unlinked_lines = await self._check_unlinked_members()
         if unlinked_lines:
-            lines.append("\n💸 **Paying but not in Discord:**")
-            lines.extend(unlinked_lines)
-            lines.append("_These members subscribed on the site but never verified in Discord — worth a nudge email._")
-
-        await post_admin_log("\n".join(lines))
+            body = (
+                "These members subscribed on the site but never verified in Discord — worth a nudge email.\n\n"
+                + "\n".join(line.replace("• ", "- ").replace("**", "").replace("`", "") for line in unlinked_lines)
+            )
+            await send_report_email(
+                subject=f"CougConnect: {len(unlinked_lines)} paying subscriber(s) not verified in Discord",
+                body_text=body,
+            )
 
     async def _check_unlinked_members(self) -> list[str]:
         """Look up webhook-seen MemberPress accounts with no Discord link; return report lines for active payers."""
@@ -252,10 +266,7 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=9, minute=0, tzinfo=datetime.timezone.utc))  # 2am MST (UTC-7)
     async def backup_db_task(self):
-        """Nightly SQLite backup posted to the admin log channel."""
-        channel = self.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if not channel:
-            return
+        """Nightly SQLite backup emailed to the admin (not posted to Discord)."""
         backup_path = "/tmp/cougconnect-backup.db"
         try:
             src = sqlite3.connect(db.DB_PATH)
@@ -264,10 +275,14 @@ class CougConnectBot(commands.Bot):
             dest.close()
             src.close()
             stamp = dt.now(timezone.utc).strftime("%Y-%m-%d")
-            await channel.send(
-                f"🗄️ Nightly database backup ({stamp})",
-                file=discord.File(backup_path, filename=f"cougconnect-{stamp}.db"),
+            sent = await send_report_email(
+                subject=f"CougConnect nightly database backup — {stamp}",
+                body_text=f"Attached is the nightly SQLite backup for {stamp}.",
+                attachment_path=backup_path,
+                attachment_name=f"cougconnect-{stamp}.db",
             )
+            if not sent:
+                await post_admin_log("❌ **Nightly DB backup email failed to send** — check SendGrid config/logs.")
         except Exception as e:
             log.error(f"DB backup failed: {e}")
             await post_admin_log(f"❌ **Nightly DB backup failed:** `{e}`")
@@ -539,6 +554,41 @@ async def post_admin_log(message: str):
             await channel.send(message)
         except Exception as e:
             log.error(f"Failed to post admin log: {e}")
+
+
+async def send_report_email(subject: str, body_text: str, attachment_path: str | None = None, attachment_name: str | None = None) -> bool:
+    """Send an admin report email via SendGrid. Returns True on success."""
+    if not SENDGRID_API_KEY or not REPORT_EMAIL_FROM or not REPORT_EMAIL_TO:
+        log.error("Report email not sent — SENDGRID_API_KEY / REPORT_EMAIL_FROM / REPORT_EMAIL_TO not all configured.")
+        return False
+    payload = {
+        "personalizations": [{"to": [{"email": REPORT_EMAIL_TO}]}],
+        "from": {"email": REPORT_EMAIL_FROM, "name": "CougConnect Bot"},
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": body_text}],
+    }
+    if attachment_path:
+        with open(attachment_path, "rb") as f:
+            payload["attachments"] = [{
+                "content": base64.b64encode(f.read()).decode(),
+                "filename": attachment_name or os.path.basename(attachment_path),
+                "type": "application/octet-stream",
+                "disposition": "attachment",
+            }]
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                json=payload,
+                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}"},
+            ) as resp:
+                if resp.status >= 300:
+                    log.error(f"SendGrid error {resp.status}: {await resp.text()}")
+                    return False
+    except Exception as e:
+        log.error(f"Report email failed: {e}")
+        return False
+    return True
 
 
 async def assign_role(discord_id: int, tier: str) -> bool:
