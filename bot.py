@@ -70,9 +70,10 @@ ROLE_IDS = {
 
 GENERAL_CHANNEL_ID = int(os.getenv("DISCORD_GENERAL_CHANNEL_ID", "1050165331894751314"))
 
-# Mods/admins react with this emoji to flag a message: it's logged to the admin
-# channel + DB, then deleted. Only members with Manage Messages can trigger it.
+# Mods/admins react with this emoji to flag a message: it's logged to the mod
+# log channel + DB, then deleted. Only members with Manage Messages can trigger it.
 FLAG_EMOJI = os.getenv("FLAG_EMOJI", "🚩")
+MOD_LOG_CHANNEL_ID = int(os.getenv("DISCORD_MOD_LOG_CHANNEL_ID", "1189800941793333389"))  # #admin-moderators
 
 FAQ_PATH = os.path.join(os.path.dirname(__file__), "faq.json")
 SCHEDULE_PATH = os.path.join(os.path.dirname(__file__), "schedule.json")
@@ -887,7 +888,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         embed.add_field(name="Attachments", value=attachments[:1024], inline=False)
     embed.set_footer(text=f"Flag #{flag_id}")
 
-    log_channel = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
+    log_channel = bot.get_channel(MOD_LOG_CHANNEL_ID)
     if log_channel:
         try:
             await log_channel.send(embed=embed, view=FlagReasonView())
