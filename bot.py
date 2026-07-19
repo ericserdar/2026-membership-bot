@@ -70,6 +70,10 @@ ROLE_IDS = {
 
 GENERAL_CHANNEL_ID = int(os.getenv("DISCORD_GENERAL_CHANNEL_ID", "1050165331894751314"))
 
+# Mods/admins react with this emoji to flag a message: it's logged to the admin
+# channel + DB, then deleted. Only members with Manage Messages can trigger it.
+FLAG_EMOJI = os.getenv("FLAG_EMOJI", "🚩")
+
 FAQ_PATH = os.path.join(os.path.dirname(__file__), "faq.json")
 SCHEDULE_PATH = os.path.join(os.path.dirname(__file__), "schedule.json")
 SPONSORS_PATH = os.path.join(os.path.dirname(__file__), "sponsors.json")
@@ -97,7 +101,10 @@ class CougConnectBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
-        # Slash-commands only; when_mentioned avoids needing the message_content intent
+        # Needed to read the content of flagged messages before deleting them.
+        # Must also be enabled under Privileged Gateway Intents in the dev portal.
+        intents.message_content = True
+        # Slash-commands only; when_mentioned avoids needing a command prefix
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self._web_runner: web.AppRunner | None = None
 
@@ -106,6 +113,7 @@ class CougConnectBot(commands.Bot):
         mp.load_tier_ids()
         self.add_view(VerifyView())
         self.add_view(ReSyncView())
+        self.add_view(FlagReasonView())
         await self.tree.sync()
         log.info("Slash commands synced.")
         self.cleanup_tokens_task.start()
@@ -800,6 +808,103 @@ class ReSyncView(discord.ui.View):
         log.info(f"Resync button: discord_id={discord_id} {old_tier} → {new_tier}")
 
 
+# ── Message flagging (mods react 🚩 → log + delete) ───────────────────────────
+
+class FlagReasonModal(discord.ui.Modal, title="Flag Reason"):
+    reason = discord.ui.TextInput(
+        label="Why was this message flagged?",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
+    )
+
+    def __init__(self, flag_id: int, log_message: discord.Message):
+        super().__init__()
+        self.flag_id = flag_id
+        self.log_message = log_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        db.set_flag_reason(self.flag_id, str(self.reason))
+        embed = self.log_message.embeds[0]
+        embed.add_field(name="Reason", value=str(self.reason), inline=False)
+        await self.log_message.edit(embed=embed, view=None)
+        await interaction.response.send_message("Reason saved.", ephemeral=True)
+
+
+class FlagReasonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Add Reason", style=discord.ButtonStyle.secondary, emoji="📝", custom_id="flag_add_reason")
+    async def add_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Flag id is carried in the log embed footer ("Flag #<id>") so the
+        # button survives bot restarts without per-message state.
+        try:
+            flag_id = int(interaction.message.embeds[0].footer.text.split("#")[1])
+        except (IndexError, ValueError, AttributeError):
+            await interaction.response.send_message("Couldn't find the flag record for this log entry.", ephemeral=True)
+            return
+        await interaction.response.send_modal(FlagReasonModal(flag_id, interaction.message))
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.guild_id != GUILD_ID or str(payload.emoji) != FLAG_EMOJI:
+        return
+    guild = get_guild()
+    if not guild:
+        return
+    flagger = guild.get_member(payload.user_id)
+    if not flagger or flagger.bot or not flagger.guild_permissions.manage_messages:
+        return
+    channel = guild.get_channel(payload.channel_id) or bot.get_channel(payload.channel_id)
+    if not channel:
+        return
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except (discord.NotFound, discord.Forbidden):
+        return
+
+    content = message.content or "(no text — embed/attachment only)"
+    attachments = ", ".join(a.url for a in message.attachments)
+    flag_id = db.log_flagged_message(
+        str(message.id), str(channel.id), getattr(channel, "name", "?"),
+        str(message.author.id), str(message.author),
+        message.content + (f"\n[attachments: {attachments}]" if attachments else ""),
+        str(flagger.id), str(flagger),
+    )
+
+    embed = discord.Embed(
+        title="🚩 Message Flagged & Deleted",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Author", value=f"{message.author.mention} ({message.author})", inline=True)
+    embed.add_field(name="Channel", value=channel.mention, inline=True)
+    embed.add_field(name="Flagged by", value=flagger.mention, inline=True)
+    embed.add_field(name="Content", value=content[:1024], inline=False)
+    if attachments:
+        embed.add_field(name="Attachments", value=attachments[:1024], inline=False)
+    embed.set_footer(text=f"Flag #{flag_id}")
+
+    log_channel = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if log_channel:
+        try:
+            await log_channel.send(embed=embed, view=FlagReasonView())
+        except Exception as e:
+            log.error(f"Failed to post flag log for flag_id={flag_id}: {e}")
+
+    try:
+        await message.delete()
+        log.info(f"Flagged message {message.id} in #{getattr(channel, 'name', '?')} deleted (flag_id={flag_id}, by {flagger})")
+    except discord.Forbidden:
+        log.error(f"Missing permission to delete flagged message {message.id} in #{getattr(channel, 'name', '?')} (flag_id={flag_id})")
+        if log_channel:
+            await log_channel.send(f"⚠️ Flag #{flag_id}: I couldn't delete the message — missing **Manage Messages** in {channel.mention}.")
+    except discord.NotFound:
+        pass
+
+
 # ── Slash commands ─────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="link-member", description="Manually link a Discord user to their CougConnect account")
@@ -1005,6 +1110,26 @@ async def pending_links(interaction: discord.Interaction):
     )
     embed.set_footer(text="Seen via MemberPress webhooks · use /link-member to link manually")
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="flag-history", description="Show recently flagged (and deleted) messages")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(limit="How many entries to show (default 10)")
+async def flag_history(interaction: discord.Interaction, limit: int = 10):
+    flags = db.get_flagged_messages(limit=min(limit, 25))
+    if not flags:
+        await interaction.response.send_message("No flagged messages on record.", ephemeral=True)
+        return
+    embed = discord.Embed(title="🚩 Flagged Message History", color=discord.Color.red())
+    for f in flags:
+        content = (f["content"] or "")[:150] or "(no text)"
+        reason = f" — reason: {f['reason']}" if f["reason"] else ""
+        embed.add_field(
+            name=f"#{f['id']} · {f['flagged_at']} · #{f['channel_name']}",
+            value=f"**{f['author_name']}**: {content}\nFlagged by {f['flagger_name']}{reason}",
+            inline=False,
+        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="tier-history", description="Show recent tier changes")

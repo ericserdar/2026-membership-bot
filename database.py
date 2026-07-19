@@ -84,6 +84,21 @@ def init_db():
                 notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS flagged_messages (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id     TEXT,
+                channel_id     TEXT,
+                channel_name   TEXT,
+                author_id      TEXT,
+                author_name    TEXT,
+                content        TEXT,
+                flagger_id     TEXT,
+                flagger_name   TEXT,
+                reason         TEXT,
+                flagged_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
 
@@ -400,3 +415,38 @@ def get_stats() -> dict:
         "insider": counts.get("insider", 0),
         "unsubscribed": counts.get("unsubscribed", 0),
     }
+
+
+# ── Flagged messages (mod moderation log) ─────────────────────────────────────
+
+def log_flagged_message(message_id: str, channel_id: str, channel_name: str,
+                        author_id: str, author_name: str, content: str,
+                        flagger_id: str, flagger_name: str) -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "INSERT INTO flagged_messages (message_id, channel_id, channel_name, author_id, author_name, content, flagger_id, flagger_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (message_id, channel_id, channel_name, author_id, author_name, content, flagger_id, flagger_name),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def set_flag_reason(flag_id: int, reason: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE flagged_messages SET reason = ? WHERE id = ?", (reason, flag_id))
+        conn.commit()
+
+
+def get_flagged_messages(limit: int = 20) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, channel_name, author_name, content, flagger_name, reason, flagged_at "
+            "FROM flagged_messages ORDER BY flagged_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {"id": r[0], "channel_name": r[1], "author_name": r[2], "content": r[3],
+         "flagger_name": r[4], "reason": r[5], "flagged_at": r[6]}
+        for r in rows
+    ]
