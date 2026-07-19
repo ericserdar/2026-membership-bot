@@ -441,13 +441,13 @@ def set_flag_reason(flag_id: int, reason: str):
 def get_flagged_messages(limit: int = 20) -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT id, channel_name, author_name, content, flagger_name, reason, flagged_at "
+            "SELECT id, channel_name, author_id, author_name, content, flagger_name, reason, flagged_at "
             "FROM flagged_messages ORDER BY flagged_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [
-        {"id": r[0], "channel_name": r[1], "author_name": r[2], "content": r[3],
-         "flagger_name": r[4], "reason": r[5], "flagged_at": r[6]}
+        {"id": r[0], "channel_name": r[1], "author_id": r[2], "author_name": r[3], "content": r[4],
+         "flagger_name": r[5], "reason": r[6], "flagged_at": r[7]}
         for r in rows
     ]
 

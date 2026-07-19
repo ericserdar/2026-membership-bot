@@ -1124,12 +1124,20 @@ async def flag_history(interaction: discord.Interaction, limit: int = 10):
         await interaction.response.send_message("No flagged messages on record.", ephemeral=True)
         return
     embed = discord.Embed(title="🚩 Flagged Message History", color=discord.Color.red())
+    # Group by author, worst offenders first
+    by_author: dict[str, list[dict]] = {}
     for f in flags:
-        content = (f["content"] or "")[:150] or "(no text)"
-        reason = f" — reason: {f['reason']}" if f["reason"] else ""
+        by_author.setdefault(f["author_id"], []).append(f)
+    for author_id, items in sorted(by_author.items(), key=lambda kv: len(kv[1]), reverse=True):
+        total = db.count_flags_for_author(author_id)
+        lines = []
+        for f in items:
+            content = (f["content"] or "")[:100] or "(no text)"
+            reason = f" — {f['reason']}" if f["reason"] else ""
+            lines.append(f"`#{f['id']}` {f['flagged_at']} · #{f['channel_name']}: {content}{reason}")
         embed.add_field(
-            name=f"#{f['id']} · {f['flagged_at']} · #{f['channel_name']}",
-            value=f"**{f['author_name']}**: {content}\nFlagged by {f['flagger_name']}{reason}",
+            name=f"{items[0]['author_name']} — {total} flag{'s' if total != 1 else ''}",
+            value="\n".join(lines)[:1024],
             inline=False,
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
