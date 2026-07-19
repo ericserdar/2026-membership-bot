@@ -880,7 +880,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         color=discord.Color.red(),
         timestamp=discord.utils.utcnow(),
     )
+    author_flags = db.count_flags_for_author(str(message.author.id))
     embed.add_field(name="Author", value=f"{message.author.mention} ({message.author})", inline=True)
+    embed.add_field(name="Author's Flag Count", value=f"{author_flags} total", inline=True)
     embed.add_field(name="Channel", value=channel.mention, inline=True)
     embed.add_field(name="Flagged by", value=flagger.mention, inline=True)
     embed.add_field(name="Content", value=content[:1024], inline=False)
@@ -1130,6 +1132,24 @@ async def flag_history(interaction: discord.Interaction, limit: int = 10):
             value=f"**{f['author_name']}**: {content}\nFlagged by {f['flagger_name']}{reason}",
             inline=False,
         )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="flag-stats", description="Running totals of flagged messages, by author")
+@app_commands.default_permissions(manage_messages=True)
+async def flag_stats(interaction: discord.Interaction):
+    stats = db.get_flag_totals()
+    embed = discord.Embed(
+        title="🚩 Flagged Message Totals",
+        description=f"**{stats['total']}** all-time · **{stats['last30']}** in the last 30 days",
+        color=discord.Color.red(),
+    )
+    if stats["by_author"]:
+        lines = [
+            f"**{i}.** {a['author_name']} (<@{a['author_id']}>) — **{a['count']}**"
+            for i, a in enumerate(stats["by_author"], 1)
+        ]
+        embed.add_field(name="By Author", value="\n".join(lines)[:1024], inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

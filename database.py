@@ -450,3 +450,29 @@ def get_flagged_messages(limit: int = 20) -> list[dict]:
          "flagger_name": r[4], "reason": r[5], "flagged_at": r[6]}
         for r in rows
     ]
+
+
+def count_flags_for_author(author_id: str) -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM flagged_messages WHERE author_id = ?", (author_id,)
+        ).fetchone()[0]
+
+
+def get_flag_totals(top: int = 15) -> dict:
+    with sqlite3.connect(DB_PATH) as conn:
+        total = conn.execute("SELECT COUNT(*) FROM flagged_messages").fetchone()[0]
+        last30 = conn.execute(
+            "SELECT COUNT(*) FROM flagged_messages WHERE flagged_at >= ?",
+            ((datetime.utcnow() - timedelta(days=30)).isoformat(sep=" "),),
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT author_id, author_name, COUNT(*) as n FROM flagged_messages "
+            "GROUP BY author_id ORDER BY n DESC, MAX(flagged_at) DESC LIMIT ?",
+            (top,),
+        ).fetchall()
+    return {
+        "total": total,
+        "last30": last30,
+        "by_author": [{"author_id": r[0], "author_name": r[1], "count": r[2]} for r in rows],
+    }
