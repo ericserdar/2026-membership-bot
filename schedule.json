@@ -3,7 +3,7 @@
   {"date": "2026-09-12", "sport": "football", "opponent": "Arizona", "home": true, "time": "1:30 PM MT", "tv": "FOX"},
   {"date": "2026-09-19", "sport": "football", "opponent": "Colorado State", "home": false, "time": "5:30 PM MT", "tv": "CBS"},
   {"date": "2026-10-03", "sport": "football", "opponent": "TCU", "home": false, "time": null, "tv": null},
-  {"date": "2026-10-10", "sport": "football", "opponent": "Iowa State", "home": true, "time": null, "tv": null},
+  {"date": "2026-10-09", "sport": "football", "opponent": "Iowa State", "home": true, "time": "8:15 PM MT", "tv": "ESPN"},
   {"date": "2026-10-17", "sport": "football", "opponent": "Notre Dame", "home": true, "time": null, "tv": null},
   {"date": "2026-10-24", "sport": "football", "opponent": "UCF", "home": false, "time": null, "tv": null},
   {"date": "2026-10-31", "sport": "football", "opponent": "Arizona State", "home": true, "time": null, "tv": null},
