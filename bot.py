@@ -459,7 +459,9 @@ class CougConnectBot(commands.Bot):
         embed.set_footer(text="CougConnect sponsors keep this community running — show them some love!")
         # Tag the sponsor in the message content (embed mentions don't ping)
         content = None
-        if sponsor.get("email"):
+        if sponsor.get("discord_id"):
+            content = f"Say thanks to <@{sponsor['discord_id']}>! 👏"
+        elif sponsor.get("email"):
             record = db.get_member_by_email(sponsor["email"])
             if record:
                 content = f"Say thanks to <@{record['discord_id']}>! 👏"

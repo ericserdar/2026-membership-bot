@@ -2,16 +2,30 @@
   {
     "name": "Common Sense Financial",
     "blurb": "Financial planning with your family's future in mind. Proud sponsor of CougConnect.",
-    "email": "troy.beagley@mycommonsensefinancial.com"
+    "email": "troy.beagley@mycommonsensefinancial.com",
+    "discord_id": "1215117601286660177"
   },
   {
     "name": "Madsen Realty Group",
     "blurb": "Buying or selling along the Wasatch Front? The Madsen Realty Group has Cougar Nation covered.",
-    "email": "brigham@wildeteam.com"
+    "email": "brigham@wildeteam.com",
+    "discord_id": "1134711010452840480"
   },
   {
     "name": "Desert Ridge Contracting",
     "blurb": "Quality contracting work from a team that bleeds blue. Proud sponsor of CougConnect.",
     "email": "payden@desertridgecontracting.com"
+  },
+  {
+    "name": "Doblo Turn Pros",
+    "blurb": "Hassle-free rental property turnovers, built by property managers for property managers. Proud sponsor of CougConnect.",
+    "email": "info@dobloturnpros.com",
+    "discord_id": "1493354544862597162"
+  },
+  {
+    "name": "Utah Travel Pros",
+    "blurb": "Stress-free vacation planning for Cougar families — Disney, cruises, and more with zero booking fees. Proud sponsor of CougConnect.",
+    "email": null,
+    "discord_id": "1278205436671033344"
   }
 ]
