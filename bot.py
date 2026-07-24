@@ -78,6 +78,16 @@ MOD_LOG_CHANNEL_ID = int(os.getenv("DISCORD_MOD_LOG_CHANNEL_ID", "11898009417933
 FAQ_PATH = os.path.join(os.path.dirname(__file__), "faq.json")
 SCHEDULE_PATH = os.path.join(os.path.dirname(__file__), "schedule.json")
 SPONSORS_PATH = os.path.join(os.path.dirname(__file__), "sponsors.json")
+APARTMENTS_PATH = os.path.join(os.path.dirname(__file__), "apartments.json")
+
+# Maps MemberPress apartment dropdown slug → {label, role_name, role_id}.
+# Grants a complex-specific Discord role on top of the tier role. Loaded at import.
+def _load_apartments() -> dict:
+    try:
+        with open(APARTMENTS_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nudge
 UPGRADE_NUDGE_DAILY_CAP = 50  # spread large cohorts over multiple days
@@ -94,6 +104,9 @@ def _load_json(path: str) -> list[dict]:
 
 def load_faq() -> list[dict]:
     return _load_json(FAQ_PATH)
+
+
+APARTMENTS = _load_apartments()
 
 
 # ── Bot class ──────────────────────────────────────────────────────────────────
@@ -628,6 +641,57 @@ async def assign_role(discord_id: int, tier: str) -> bool:
     return True
 
 
+def _resolve_apartment_role(guild: discord.Guild, cfg: dict) -> discord.Role | None:
+    """Resolve an apartment role by ID (preferred) or exact name."""
+    rid = cfg.get("role_id") or 0
+    if rid:
+        role = guild.get_role(int(rid))
+        if role:
+            return role
+    name = cfg.get("role_name")
+    if name:
+        return discord.utils.get(guild.roles, name=name)
+    return None
+
+
+async def assign_apartment_role(discord_id: int, slug: str | None) -> None:
+    """Grant the Discord role for a member's BYU apartment complex.
+
+    Adds the role matching `slug` (a MemberPress dropdown slug) and removes any
+    other apartment role the member holds. A None/unknown/non-housing slug clears
+    all apartment roles. Never touches tier roles.
+    """
+    if not APARTMENTS:
+        return
+    guild = get_guild()
+    if not guild:
+        return
+    member = guild.get_member(discord_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(discord_id)
+        except discord.NotFound:
+            return
+
+    # Resolve every configured apartment role once.
+    slug_to_role: dict[str, discord.Role] = {}
+    for s, cfg in APARTMENTS.items():
+        role = _resolve_apartment_role(guild, cfg)
+        if role:
+            slug_to_role[s] = role
+        else:
+            log.warning(f"Apartment role for slug '{s}' not found in guild (role_id={cfg.get('role_id')}, role_name={cfg.get('role_name')!r})")
+
+    target_role = slug_to_role.get(slug) if slug else None
+    apartment_roles = set(slug_to_role.values())
+    to_remove = [r for r in member.roles if r in apartment_roles and r != target_role]
+
+    if to_remove:
+        await member.remove_roles(*to_remove, reason="CougConnect apartment sync")
+    if target_role and target_role not in member.roles:
+        await member.add_roles(target_role, reason=f"CougConnect apartment: {slug}")
+
+
 async def sync_members(members: list, reason: str, delay_between: float) -> int:
     """Re-check each linked member against MemberPress and update tier/role.
 
@@ -637,8 +701,9 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
     changed = 0
     for record in members:
         try:
-            active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
+            member_obj, active_ids = await mp.get_member_and_active_ids(record["mp_member_id"], record["mp_email"])
             new_tier = mp.resolve_tier(active_ids)
+            apartment_slug = mp.get_apartment_slug(member_obj) if member_obj else None
             if new_tier != record["tier"]:
                 if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
                     await asyncio.sleep(30)
@@ -649,6 +714,7 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
                         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"{reason}:confirmed")
                         db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
                         await assign_role(int(record["discord_id"]), "unsubscribed")
+                        await assign_apartment_role(int(record["discord_id"]), None)
                         changed += 1
                     else:
                         log.warning(f"{reason}: discord_id={record['discord_id']} showed unsubscribed then {verify_tier} — transient API issue, skipping")
@@ -657,9 +723,14 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
                     db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason=reason)
                     db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
                     await assign_role(int(record["discord_id"]), new_tier)
+                    await assign_apartment_role(int(record["discord_id"]), apartment_slug)
                     changed += 1
             else:
                 db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                # Keep apartment role in sync even when tier is unchanged (member may
+                # have set/changed their housing on the website since last sync).
+                if new_tier in ("gold", "silver", "insider"):
+                    await assign_apartment_role(int(record["discord_id"]), apartment_slug)
         except Exception as e:
             log.error(f"{reason} error for discord_id={record['discord_id']}: {e}")
         await asyncio.sleep(delay_between)
@@ -670,18 +741,23 @@ def tier_label(tier: str) -> str:
     return {"gold": "Gold", "silver": "Silver", "insider": "Insider", "unsubscribed": "Unsubscribed"}.get(tier, tier.title())
 
 
-async def send_welcome_dm(discord_id: int, tier: str):
+async def send_welcome_dm(discord_id: int, tier: str, apartment_slug: str | None = None):
     """Welcome DM after a successful verification, with a tier-specific channel guide."""
     tier_perks = {
         "gold": "As a **Gold** member you have full access — insider reports, the Gold lounge, AMAs, and voice chats.",
         "silver": "As a **Silver** member you get insider reports and the Silver channels, plus community events.",
         "insider": "As an **Insider** you have access to the community channels and insider discussions.",
     }
+    apartment_line = ""
+    cfg = APARTMENTS.get(apartment_slug) if apartment_slug else None
+    if cfg:
+        apartment_line = f"🏠 We also gave you the **{cfg.get('label', apartment_slug)}** role — check out your complex's channel to connect with neighbors.\n\n"
     try:
         user = await bot.fetch_user(discord_id)
         await user.send(
             f"🎉 Welcome to CougConnect! Your **{tier_label(tier)}** role is set.\n\n"
             f"{tier_perks.get(tier, '')}\n\n"
+            f"{apartment_line}"
             "Introduce yourself in the community channel and jump into the conversation. Go Cougs! 🏈"
         )
     except Exception:
@@ -781,7 +857,7 @@ class ReSyncView(discord.ui.View):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        active_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
+        member_obj, active_ids = await mp.get_member_and_active_ids(record["mp_member_id"], record["mp_email"])
         new_tier = mp.resolve_tier(active_ids)
 
         if new_tier == "unsubscribed":
@@ -801,6 +877,8 @@ class ReSyncView(discord.ui.View):
         db.log_tier_change(discord_id, record["mp_email"], old_tier, new_tier, reason="resync-button")
         db.upsert_member(discord_id, record["mp_member_id"], record["mp_email"], new_tier)
         await assign_role(int(discord_id), new_tier)
+        apartment_slug = mp.get_apartment_slug(member_obj) if member_obj else None
+        await assign_apartment_role(int(discord_id), apartment_slug)
 
         embed = discord.Embed(
             title="✅ Role Updated!",
@@ -1049,6 +1127,11 @@ async def profile(interaction: discord.Interaction, user: discord.Member):
         embed.add_field(name="Expires", value=sub_status["expires_at"], inline=True)
     embed.add_field(name="Linked On", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
     embed.add_field(name="Last Synced", value=record["last_synced"][:10] if record["last_synced"] else "—", inline=True)
+
+    apartment_slug = mp.get_apartment_slug(mp_data) if mp_data else None
+    if apartment_slug:
+        cfg = APARTMENTS.get(apartment_slug)
+        embed.add_field(name="Apartment", value=cfg.get("label", apartment_slug) if cfg else apartment_slug, inline=True)
 
     add_active_subscriptions_field(embed, mp_data)
 
@@ -1395,8 +1478,11 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
                Please contact an admin in the Discord server.</p>
         """)
 
-    log.info(f"Verified discord_id={discord_id} email={email} tier={tier}")
-    asyncio.create_task(send_welcome_dm(int(discord_id), tier))
+    apartment_slug = mp.get_apartment_slug(mp_member)
+    await assign_apartment_role(int(discord_id), apartment_slug)
+
+    log.info(f"Verified discord_id={discord_id} email={email} tier={tier} apartment={apartment_slug}")
+    asyncio.create_task(send_welcome_dm(int(discord_id), tier, apartment_slug))
     tier_display = tier_label(tier)
     return _page("Verified!", f"""
         <h1>✅ You're Verified!</h1>
@@ -1437,6 +1523,7 @@ async def process_webhook_event(event: str, mp_member_id: int, record: dict):
         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"webhook:{event}")
         db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], "unsubscribed")
         await assign_role(discord_id, "unsubscribed")
+        await assign_apartment_role(discord_id, None)
         log.info(f"Set discord_id={discord_id} to unsubscribed via event={event}")
         try:
             user = await bot.fetch_user(discord_id)
@@ -1451,9 +1538,10 @@ async def process_webhook_event(event: str, mp_member_id: int, record: dict):
         # Webhooks fire before MemberPress commits the subscription, so retry
         # with backoff until the API reflects an active membership.
         tier = "unsubscribed"
+        member_obj = None
         for attempt, delay in enumerate(REACTIVATE_RETRY_DELAYS, 1):
             await asyncio.sleep(delay)
-            active_ids = await mp.get_active_membership_ids(mp_member_id, record["mp_email"])
+            member_obj, active_ids = await mp.get_member_and_active_ids(mp_member_id, record["mp_email"])
             tier = mp.resolve_tier(active_ids)
             if tier != "unsubscribed":
                 break
@@ -1471,7 +1559,9 @@ async def process_webhook_event(event: str, mp_member_id: int, record: dict):
         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], tier, reason=f"webhook:{event}")
         db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], tier)
         await assign_role(discord_id, tier)
-        log.info(f"Re-activated discord_id={discord_id} as tier={tier} via event={event}")
+        apartment_slug = mp.get_apartment_slug(member_obj) if member_obj else None
+        await assign_apartment_role(discord_id, apartment_slug)
+        log.info(f"Re-activated discord_id={discord_id} as tier={tier} apartment={apartment_slug} via event={event}")
 
 
 async def handle_webhook(request: web.Request) -> web.Response:
