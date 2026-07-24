@@ -1,5 +1,6 @@
 {
   "alpine-village": { "label": "Alpine Village", "role_name": "Alpine Village", "role_id": 1530093406439608350 },
-  "rain-tree":      { "label": "Rain Tree",      "role_name": "Rain Tree",      "role_id": 0 },
-  "king-henry":     { "label": "King Henry",     "role_name": "King Henry",     "role_id": 0 }
+  "king-henry":     { "label": "King Henry",     "role_name": "King Henry",     "role_id": 0 },
+  "branbury":       { "label": "Branbury",       "role_name": "Branbury",       "role_id": 0 },
+  "rain-tree":      { "label": "Rain Tree",      "role_name": "Rain Tree",      "role_id": 0 }
 }
