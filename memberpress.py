@@ -67,6 +67,42 @@ async def resolve_tier_or_none(mp_member_id: int, mp_email: str = "") -> tuple[s
     return resolve_tier(active_ids), member
 
 
+async def get_all_members_paged(per_page: int = 100, max_pages: int = 40) -> tuple[list[dict], int]:
+    """Fetch all MemberPress members across pages.
+
+    Returns (members, failed_pages). A page that errors/non-200 is counted in
+    failed_pages and skipped rather than aborting the whole scan (the API is
+    intermittently flaky). Stops on the first short/empty successful page.
+    """
+    import logging
+    log = logging.getLogger("cougconnect")
+    members: list[dict] = []
+    failed = 0
+    async with aiohttp.ClientSession() as session:
+        for page in range(1, max_pages + 1):
+            try:
+                async with session.get(
+                    _api("members"),
+                    headers={"MEMBERPRESS-API-KEY": MP_KEY},
+                    params={"per_page": per_page, "page": page},
+                ) as resp:
+                    if resp.status != 200:
+                        failed += 1
+                        log.warning(f"get_all_members_paged: page {page} status {resp.status}")
+                        continue
+                    batch = await resp.json()
+            except Exception as e:
+                failed += 1
+                log.warning(f"get_all_members_paged: page {page} error {e}")
+                continue
+            if not batch:
+                break
+            members.extend(batch)
+            if len(batch) < per_page:
+                break
+    return members, failed
+
+
 async def get_member_by_email(email: str) -> dict | None:
     """Return the first MemberPress member matching the email, or None."""
     import logging

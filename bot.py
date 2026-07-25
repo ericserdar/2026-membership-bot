@@ -11,6 +11,7 @@ CougConnect Discord Membership Bot
 
 import asyncio
 import base64
+from collections import Counter
 import hashlib
 import hmac
 import html
@@ -1313,6 +1314,50 @@ async def stats(interaction: discord.Interaction):
     embed.add_field(name="❌ Unsubscribed", value=str(s["unsubscribed"]), inline=True)
     embed.set_footer(text=f"As of {dt.now(timezone.utc).strftime('%m/%d/%Y %H:%M')} UTC")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="apartment-stats", description="How many members chose each BYU apartment complex")
+@app_commands.default_permissions(administrator=True)
+async def apartment_stats(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    members, failed = await mp.get_all_members_paged()
+
+    tally = Counter()
+    for m in members:
+        slug = mp.get_apartment_slug(m)
+        if slug and slug != "not-applicable":
+            tally[slug] += 1
+
+    guild = get_guild()
+    # Combine complexes people actually chose with the ones we've configured,
+    # so admins see both real demand and which configured roles are still empty.
+    all_slugs = set(tally) | set(APARTMENTS)
+    rows = []  # (count, has_role, label, line)
+    for slug in all_slugs:
+        count = tally.get(slug, 0)
+        cfg = APARTMENTS.get(slug)
+        if cfg:
+            role = _resolve_apartment_role(guild, cfg) if guild else None
+            marker = "" if role else " ⚠️ _role missing_"
+            label = cfg.get("label", slug)
+            rows.append((count, f"**{label}** — {count}{marker}"))
+        else:
+            # A complex members selected that has no Discord role/channel yet.
+            rows.append((count, f"`{slug}` — {count}  🆕 _no role yet_"))
+    rows.sort(key=lambda r: (-r[0], r[1].lower()))
+
+    embed = discord.Embed(
+        title="🏠 Apartment Complex Breakdown",
+        description="\n".join(r[1] for r in rows) or "No members have selected an apartment yet.",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Members scanned", value=str(len(members)), inline=True)
+    embed.add_field(name="With a complex set", value=str(sum(tally.values())), inline=True)
+    footer = f"As of {dt.now(timezone.utc).strftime('%m/%d/%Y %H:%M')} UTC"
+    if failed:
+        footer += f" · ⚠️ {failed} page(s) failed to load — counts may be low"
+    embed.set_footer(text=footer)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="churn", description="Churn analysis — cancellations vs new members over recent months")
