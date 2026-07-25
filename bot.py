@@ -695,21 +695,32 @@ async def assign_apartment_role(discord_id: int, slug: str | None) -> None:
 async def sync_members(members: list, reason: str, delay_between: float) -> int:
     """Re-check each linked member against MemberPress and update tier/role.
 
-    Downgrades to unsubscribed are double-checked after 30s to guard against
-    transient API failures. Returns the number of roles changed.
+    A member whose MemberPress record can't be fetched (transient rest_no_route
+    404 / API failure) is SKIPPED — their role is left untouched — rather than
+    being treated as unsubscribed. Downgrades are only applied when we get a real
+    member object showing no active memberships, and are double-checked after 30s.
+    Returns the number of roles changed.
     """
     changed = 0
+    skipped = 0
     for record in members:
         try:
-            member_obj, active_ids = await mp.get_member_and_active_ids(record["mp_member_id"], record["mp_email"])
-            new_tier = mp.resolve_tier(active_ids)
+            new_tier, member_obj = await mp.resolve_tier_or_none(record["mp_member_id"], record["mp_email"])
+            if new_tier is None:
+                # Couldn't reach MemberPress for this member — do NOT downgrade.
+                skipped += 1
+                log.warning(f"{reason}: discord_id={record['discord_id']} ({record['mp_email']}) unreachable in MemberPress — skipping, role unchanged")
+                await asyncio.sleep(delay_between)
+                continue
             apartment_slug = mp.get_apartment_slug(member_obj) if member_obj else None
             if new_tier != record["tier"]:
                 if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
                     await asyncio.sleep(30)
-                    verify_ids = await mp.get_active_membership_ids(record["mp_member_id"], record["mp_email"])
-                    verify_tier = mp.resolve_tier(verify_ids)
-                    if verify_tier == "unsubscribed":
+                    verify_tier, _ = await mp.resolve_tier_or_none(record["mp_member_id"], record["mp_email"])
+                    if verify_tier is None:
+                        skipped += 1
+                        log.warning(f"{reason}: discord_id={record['discord_id']} showed unsubscribed then unreachable on recheck — transient API issue, skipping")
+                    elif verify_tier == "unsubscribed":
                         log.info(f"{reason} confirmed downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — tier {record['tier']} → unsubscribed")
                         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"{reason}:confirmed")
                         db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
@@ -734,6 +745,8 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
         except Exception as e:
             log.error(f"{reason} error for discord_id={record['discord_id']}: {e}")
         await asyncio.sleep(delay_between)
+    if skipped:
+        log.warning(f"{reason}: {skipped} member(s) skipped due to MemberPress API failures (roles left unchanged).")
     return changed
 
 
@@ -1003,8 +1016,20 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
     mp_id = mp_member.get("id")
     active_ids = mp.active_ids_from_member_object(mp_member)
     if not active_ids:
-        active_ids = await mp.get_active_membership_ids(mp_id)
-    tier = mp.resolve_tier(active_ids)
+        # Email search showed no active memberships. Confirm with a direct fetch
+        # before trusting it — a flaky by-id lookup must not fabricate an unsubscribe.
+        confirm_tier, _ = await mp.resolve_tier_or_none(mp_id, email)
+        if confirm_tier is None:
+            await interaction.followup.send(
+                f"⚠️ Found `{email}` but couldn't confirm their membership status right now "
+                "(MemberPress API error). **No role assigned.** Try `/link-member` again in a minute.",
+                ephemeral=True,
+            )
+            log.warning(f"link-member: {email} found by email but status unconfirmable — aborting to avoid false downgrade")
+            return
+        tier = confirm_tier
+    else:
+        tier = mp.resolve_tier(active_ids)
 
     existing = db.get_member_by_discord(str(user.id))
     old_tier = existing["tier"] if existing else "none"
@@ -1049,12 +1074,24 @@ async def sync_member(interaction: discord.Interaction, user: discord.Member):
         await interaction.followup.send(f"❌ {user.display_name} has no linked account. Use `/link-member` first.", ephemeral=True)
         return
 
-    active_ids = await mp.get_active_membership_ids(existing["mp_member_id"], existing["mp_email"])
-    tier = mp.resolve_tier(active_ids)
+    tier, member_obj = await mp.resolve_tier_or_none(existing["mp_member_id"], existing["mp_email"])
+    if tier is None:
+        await interaction.followup.send(
+            f"⚠️ Couldn't reach MemberPress for **{user.display_name}** (`{existing['mp_email']}`) right now — "
+            "the API returned an error. **Role left unchanged.** Try again in a minute.",
+            ephemeral=True,
+        )
+        log.warning(f"sync-member: {existing['mp_email']} unreachable in MemberPress — role left unchanged")
+        return
     if tier != existing["tier"]:
         db.log_tier_change(str(user.id), existing["mp_email"], existing["tier"], tier, reason="sync-member")
     db.upsert_member(str(user.id), existing["mp_member_id"], existing["mp_email"], tier)
     await assign_role(user.id, tier)
+    apartment_slug = mp.get_apartment_slug(member_obj) if member_obj else None
+    if tier in ("gold", "silver", "insider"):
+        await assign_apartment_role(user.id, apartment_slug)
+    else:
+        await assign_apartment_role(user.id, None)
     await interaction.followup.send(
         f"✅ Synced **{user.display_name}** — current tier: **{tier_label(tier)}**", ephemeral=True
     )

@@ -47,6 +47,26 @@ def resolve_tier(membership_ids: list[int]) -> str:
     return "unsubscribed"
 
 
+async def resolve_tier_or_none(mp_member_id: int, mp_email: str = "") -> tuple[str | None, dict | None]:
+    """Resolve a member's current tier, distinguishing "unsubscribed" from "API failed".
+
+    Returns (tier, member):
+      - (tier, member_obj) when the member was fetched successfully. A genuinely
+        unsubscribed member returns ("unsubscribed", member_obj) — the object still
+        exists in WordPress with an empty active_memberships list.
+      - (None, None) when the member could NOT be fetched at all (transient
+        rest_no_route 404 or other API failure). Callers MUST treat None as
+        "don't know — leave the current role alone", never as unsubscribed.
+
+    This is the guard against the false-downgrade bug: a flaky /members/{id}
+    endpoint used to zero out active_memberships and silently demote paying members.
+    """
+    member, active_ids = await get_member_and_active_ids(mp_member_id, mp_email)
+    if member is None:
+        return None, None
+    return resolve_tier(active_ids), member
+
+
 async def get_member_by_email(email: str) -> dict | None:
     """Return the first MemberPress member matching the email, or None."""
     import logging
