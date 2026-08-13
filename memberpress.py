@@ -238,3 +238,73 @@ def parse_subscription_status(member_data: dict) -> dict:
         return {"status": "Expired", "expires_at": None}
     else:
         return {"status": raw_status.title(), "expires_at": None}
+
+
+# ---------------------------------------------------------------------------
+# Membership tenure (from WordPress, not MemberPress)
+# ---------------------------------------------------------------------------
+#
+# MemberPress's REST API exposes members, memberships and subscriptions — but
+# NOT transactions, and /members/{id}/subscriptions 404s on this install. Only
+# the transaction table records paid periods, so gaps, resubscribes and tier
+# switches are invisible from here.
+#
+# The cc-shirt-batches plugin already computes this correctly on the WordPress
+# side, so we ask it rather than reimplementing the arithmetic (and its edge
+# cases) in Python.
+
+TENURE_URL = os.getenv("CCSB_TENURE_URL", "")
+TENURE_KEY = os.getenv("CCSB_TENURE_KEY", "")
+
+
+async def get_tenure_map() -> dict | None:
+    """Fetch paid-membership tenure for everyone linked to Discord.
+
+    Returns {email_lower: {"days": int, "years": int, "active": bool, "tier": str}}.
+
+    Returns None — never {} — when the call fails, matching the convention in
+    resolve_tier_or_none(): None means "we don't know, change nothing". A
+    milestone run that treated a failed fetch as "nobody qualifies" would strip
+    roles from the whole server.
+    """
+    import logging
+    log = logging.getLogger("cougconnect")
+
+    if not TENURE_URL or not TENURE_KEY:
+        log.warning("Tenure endpoint not configured (CCSB_TENURE_URL / CCSB_TENURE_KEY)")
+        return None
+
+    headers = {"X-CCSB-Key": TENURE_KEY}
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(TENURE_URL, headers=headers) as resp:
+                if resp.status != 200:
+                    log.error(f"Tenure fetch failed: HTTP {resp.status}")
+                    return None
+                payload = await resp.json()
+    except Exception as e:
+        log.error(f"Tenure fetch failed: {e}")
+        return None
+
+    members = payload.get("members") if isinstance(payload, dict) else None
+    if not isinstance(members, list):
+        log.error("Tenure response missing 'members' list")
+        return None
+
+    out: dict[str, dict] = {}
+    for m in members:
+        email = str(m.get("email", "")).strip().lower()
+        if not email:
+            continue
+        out[email] = {
+            "days": int(m.get("days") or 0),
+            "years": int(m.get("years") or 0),
+            "active": bool(m.get("active")),
+            "tier": str(m.get("tier") or ""),
+            "discord_id": str(m.get("discord_id") or ""),
+        }
+
+    log.info(f"Tenure map loaded: {len(out)} members")
+    return out

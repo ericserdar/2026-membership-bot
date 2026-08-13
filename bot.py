@@ -71,6 +71,10 @@ ROLE_IDS = {
 
 GENERAL_CHANNEL_ID = int(os.getenv("DISCORD_GENERAL_CHANNEL_ID", "1050165331894751314"))
 
+# Membership milestones post here. Falls back to general so an unset value can
+# never silence the feature outright.
+MILESTONE_CHANNEL_ID = int(os.getenv("DISCORD_MILESTONE_CHANNEL_ID", "0")) or GENERAL_CHANNEL_ID
+
 # Mods/admins react with this emoji to flag a message: it's logged to the mod
 # log channel + DB, then deleted. Only members with Manage Messages can trigger it.
 FLAG_EMOJI = os.getenv("FLAG_EMOJI", "🚩")
@@ -90,6 +94,11 @@ def _load_apartments() -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
+# A normal day produces at most one or two milestones. Anything above this in a
+# single run means something is wrong — most likely the seed never ran — so the
+# task refuses rather than dumping hundreds of posts in the channel.
+MILESTONE_FLOOD_LIMIT = int(os.getenv("MILESTONE_FLOOD_LIMIT", "10"))
+
 UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nudge
 UPGRADE_NUDGE_DAILY_CAP = 50  # spread large cohorts over multiple days
 WINBACK_DAYS = 30
@@ -108,6 +117,11 @@ def load_faq() -> list[dict]:
 
 
 APARTMENTS = _load_apartments()
+
+MILESTONES_PATH = os.path.join(os.path.dirname(__file__), "milestones.json")
+
+# [{years, role_name, role_id}] — the tenure roles, highest earned one held.
+MILESTONES = sorted(_load_json(MILESTONES_PATH), key=lambda m: int(m.get("years", 0)))
 
 
 # ── Bot class ──────────────────────────────────────────────────────────────────
@@ -381,33 +395,96 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=15, minute=0, tzinfo=datetime.timezone.utc))  # ~9am MT
     async def milestone_task(self):
-        """Celebrate membership anniversaries in the general channel."""
-        channel = self.get_channel(GENERAL_CHANNEL_ID)
+        """Celebrate membership milestones from real paid tenure.
+
+        Tenure comes from WordPress, not from linked_at: someone can pay for
+        three years and only link Discord last month, or cancel and resubscribe.
+        It counts paid time on ANY tier (Insider/Silver/Gold/Basic) and freezes
+        during a lapse, so ten months paid then six months away is still ten.
+
+        Unsubscribed members are never celebrated, and lose the tenure role
+        until they come back.
+        """
+        channel = self.get_channel(MILESTONE_CHANNEL_ID)
         if not channel:
+            log.warning(f"Milestone channel {MILESTONE_CHANNEL_ID} not found")
             return
-        today = dt.now(timezone.utc).date()
+
+        tenure = await mp.get_tenure_map()
+        if tenure is None:
+            # None means the fetch failed. Acting on that would strip roles from
+            # everyone, so do nothing at all.
+            log.warning("Milestone run skipped: tenure unavailable")
+            return
+
+        # First pass: who would be announced? A large number means the backfill
+        # was never seeded, and announcing them all would be a disaster.
+        pending = 0
         for record in db.get_all_members():
-            if record["tier"] not in ("gold", "silver", "insider") or not record["linked_at"]:
+            email = (record.get("mp_email") or "").strip().lower()
+            info = tenure.get(email) if email else None
+            if not info or not info["active"] or info["years"] < 1:
                 continue
-            try:
-                linked = dt.fromisoformat(record["linked_at"]).date()
-            except ValueError:
+            if not db.notice_sent("milestone_notices", record["discord_id"], info["years"]):
+                pending += 1
+
+        if pending > MILESTONE_FLOOD_LIMIT:
+            log.error(f"Milestone run aborted: {pending} pending exceeds limit {MILESTONE_FLOOD_LIMIT}")
+            await post_admin_log(
+                f"⚠️ Milestone run **aborted** — {pending} members would have been announced at once "
+                f"(limit {MILESTONE_FLOOD_LIMIT}). Run `/seed-milestones` first, then it will resume normally."
+            )
+            return
+
+        announced = 0
+        for record in db.get_all_members():
+            email = (record.get("mp_email") or "").strip().lower()
+            if not email:
                 continue
-            if (linked.month, linked.day) != (today.month, today.day):
+            info = tenure.get(email)
+            if not info:
                 continue
-            years = today.year - linked.year
-            if years < 1 or db.notice_sent("milestone_notices", record["discord_id"], years):
+
+            discord_id = record["discord_id"]
+
+            # Not currently paying: no announcement, and take the badge back.
+            if not info["active"]:
+                try:
+                    await assign_milestone_role(int(discord_id), None)
+                except Exception as e:
+                    log.error(f"Milestone role clear failed for discord_id={discord_id}: {e}")
                 continue
+
+            years = info["years"]
+            if years < 1 or db.notice_sent("milestone_notices", discord_id, years):
+                # Already recorded — this also restores a returning member's
+                # role below without re-announcing.
+                if years >= 1:
+                    try:
+                        await assign_milestone_role(int(discord_id), years)
+                    except Exception as e:
+                        log.error(f"Milestone role restore failed for discord_id={discord_id}: {e}")
+                continue
+
             label = "1 year" if years == 1 else f"{years} years"
             try:
+                await assign_milestone_role(int(discord_id), years)
                 await channel.send(
-                    f"🎉 Shoutout to <@{record['discord_id']}> — **{label}** as a CougConnect "
-                    f"**{tier_label(record['tier'])}** member today! Thanks for backing the Cougs with us. 🏈"
+                    f"🎉 Shoutout to <@{discord_id}> — **{label}** with CougConnect "
+                    f"as a **{tier_label(info['tier'] or record['tier'])}** member! "
+                    f"Thanks for backing the Cougs with us. 🏈"
                 )
-                db.record_notice("milestone_notices", record["discord_id"], years)
+                announced += 1
             except Exception as e:
-                log.error(f"Milestone post failed for discord_id={record['discord_id']}: {e}")
+                log.error(f"Milestone post failed for discord_id={discord_id}: {e}")
+            finally:
+                # Recorded either way — a member whose DM/role/post fails must
+                # not be retried every day forever (same call as upgrade nudges).
+                db.record_notice("milestone_notices", discord_id, years)
             await asyncio.sleep(2)
+
+        if announced:
+            await post_admin_log(f"🎉 Posted {announced} membership milestone(s).")
 
     @milestone_task.before_loop
     async def before_milestone(self):
@@ -691,6 +768,69 @@ async def assign_apartment_role(discord_id: int, slug: str | None) -> None:
         await member.remove_roles(*to_remove, reason="CougConnect apartment sync")
     if target_role and target_role not in member.roles:
         await member.add_roles(target_role, reason=f"CougConnect apartment: {slug}")
+
+
+def _resolve_milestone_role(guild: discord.Guild, cfg: dict) -> discord.Role | None:
+    """Resolve a tenure role by ID (preferred) or exact name."""
+    rid = cfg.get("role_id") or 0
+    if rid:
+        role = guild.get_role(int(rid))
+        if role:
+            return role
+    name = cfg.get("role_name")
+    if name:
+        return discord.utils.get(guild.roles, name=name)
+    return None
+
+
+async def assign_milestone_role(discord_id: int, years: int | None) -> None:
+    """Grant the tenure role for `years` and remove any other tenure role.
+
+    Modelled on assign_apartment_role, NOT assign_role: assign_role deliberately
+    strips every role in ROLE_IDS before adding one, so a tenure role placed
+    there would be wiped by the 3am sync. This only ever touches roles listed in
+    milestones.json.
+
+    years=None clears every tenure role — used when a member is no longer
+    subscribed, so nobody wears a badge they aren't currently paying for.
+    """
+    if not MILESTONES:
+        return
+    guild = get_guild()
+    if not guild:
+        return
+    member = guild.get_member(discord_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(discord_id)
+        except discord.NotFound:
+            return
+
+    years_to_role: dict[int, discord.Role] = {}
+    for cfg in MILESTONES:
+        role = _resolve_milestone_role(guild, cfg)
+        if role:
+            years_to_role[int(cfg["years"])] = role
+        else:
+            log.warning(
+                f"Milestone role for {cfg.get('years')} years not found in guild "
+                f"(role_id={cfg.get('role_id')}, role_name={cfg.get('role_name')!r})"
+            )
+
+    # Award the highest configured milestone they have reached.
+    target_role = None
+    if years:
+        earned = [y for y in years_to_role if y <= years]
+        if earned:
+            target_role = years_to_role[max(earned)]
+
+    milestone_roles = set(years_to_role.values())
+    to_remove = [r for r in member.roles if r in milestone_roles and r != target_role]
+
+    if to_remove:
+        await member.remove_roles(*to_remove, reason="CougConnect tenure sync")
+    if target_role and target_role not in member.roles:
+        await member.add_roles(target_role, reason=f"CougConnect tenure: {years} years")
 
 
 async def sync_members(members: list, reason: str, delay_between: float) -> int:
@@ -1217,6 +1357,71 @@ async def sync_all(interaction: discord.Interaction):
     changed = await sync_members(members, reason="sync-all", delay_between=0.5)
     await interaction.followup.send(
         f"✅ Sync complete — checked **{len(members)}** members, updated **{changed}** role(s).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="seed-milestones", description="Backfill tenure roles silently — assigns roles, announces nobody")
+@app_commands.default_permissions(administrator=True)
+async def seed_milestones(interaction: discord.Interaction):
+    """Bring existing members up to date without spamming the channel.
+
+    Hundreds of members are already years in. Running milestone_task cold would
+    announce every one of them, so this records their milestones as already
+    handled and applies the roles quietly.
+
+    Notices are written for EVERY year up to their current one, so a member at
+    three years never later triggers a "1 year" post. Roles go only to members
+    who are currently subscribed; lapsed members still get their notices
+    recorded so they are never retro-announced if they return.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    tenure = await mp.get_tenure_map()
+    if tenure is None:
+        await interaction.followup.send(
+            "❌ Could not reach the tenure endpoint — nothing was changed. "
+            "Check CCSB_TENURE_URL and CCSB_TENURE_KEY.",
+            ephemeral=True,
+        )
+        return
+
+    seeded = 0
+    roled = 0
+    skipped_lapsed = 0
+
+    for record in db.get_all_members():
+        email = (record.get("mp_email") or "").strip().lower()
+        info = tenure.get(email) if email else None
+        if not info or info["years"] < 1:
+            continue
+
+        discord_id = record["discord_id"]
+
+        for year in range(1, info["years"] + 1):
+            if not db.notice_sent("milestone_notices", discord_id, year):
+                db.record_notice("milestone_notices", discord_id, year)
+        seeded += 1
+
+        if not info["active"]:
+            skipped_lapsed += 1
+            continue
+
+        try:
+            await assign_milestone_role(int(discord_id), info["years"])
+            roled += 1
+        except Exception as e:
+            log.error(f"Seed role failed for discord_id={discord_id}: {e}")
+        await asyncio.sleep(0.5)
+
+    await post_admin_log(
+        f"🌱 Milestone seed: {seeded} member(s) recorded, {roled} role(s) applied, "
+        f"{skipped_lapsed} lapsed skipped. No announcements sent."
+    )
+    await interaction.followup.send(
+        f"✅ Seeded **{seeded}** member(s) — **{roled}** role(s) applied, "
+        f"**{skipped_lapsed}** lapsed skipped.\n"
+        f"Nothing was announced. The next milestone run will only post genuinely new ones.",
         ephemeral=True,
     )
 
