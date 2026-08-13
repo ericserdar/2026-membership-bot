@@ -311,6 +311,21 @@ def notice_sent(table: str, discord_id: str, key) -> bool:
     return row is not None
 
 
+def clear_notices_above(table: str, discord_id: str, years: int) -> int:
+    """Drop milestone notices for years the member has not actually reached.
+
+    Needed when tenure is recalculated downward — an over-granted notice would
+    silently suppress the real milestone when they genuinely get there.
+    """
+    assert table in ("winback_notices", "milestone_notices")
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE discord_id = ? AND years > ?",
+            (str(discord_id), int(years)),
+        )
+        return cur.rowcount or 0
+
+
 def record_notice(table: str, discord_id: str, key):
     assert table in ("winback_notices", "milestone_notices")
     col = "changed_at" if table == "winback_notices" else "years"

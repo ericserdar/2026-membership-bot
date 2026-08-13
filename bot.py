@@ -1389,6 +1389,7 @@ async def seed_milestones(interaction: discord.Interaction):
     seeded = 0
     roled = 0
     skipped_lapsed = 0
+    corrected = 0
 
     for record in db.get_all_members():
         email = (record.get("mp_email") or "").strip().lower()
@@ -1397,6 +1398,11 @@ async def seed_milestones(interaction: discord.Interaction):
             continue
 
         discord_id = record["discord_id"]
+
+        # Tenure can be recalculated downward — overlapping memberships used to
+        # be double-counted — so drop notices for years they have not actually
+        # reached. Leaving them would silently suppress the real milestone.
+        corrected += db.clear_notices_above("milestone_notices", discord_id, info["years"])
 
         for year in range(1, info["years"] + 1):
             if not db.notice_sent("milestone_notices", discord_id, year):
@@ -1416,11 +1422,12 @@ async def seed_milestones(interaction: discord.Interaction):
 
     await post_admin_log(
         f"🌱 Milestone seed: {seeded} member(s) recorded, {roled} role(s) applied, "
-        f"{skipped_lapsed} lapsed skipped. No announcements sent."
+        f"{skipped_lapsed} lapsed skipped, {corrected} stale notice(s) cleared. "
+        f"No announcements sent."
     )
     await interaction.followup.send(
         f"✅ Seeded **{seeded}** member(s) — **{roled}** role(s) applied, "
-        f"**{skipped_lapsed}** lapsed skipped.\n"
+        f"**{skipped_lapsed}** lapsed skipped, **{corrected}** stale notice(s) cleared.\n"
         f"Nothing was announced. The next milestone run will only post genuinely new ones.",
         ephemeral=True,
     )
