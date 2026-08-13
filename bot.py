@@ -419,13 +419,13 @@ class CougConnectBot(commands.Bot):
 
         # First pass: who would be announced? A large number means the backfill
         # was never seeded, and announcing them all would be a disaster.
+        targets = _milestone_targets(tenure)
+
         pending = 0
-        for record in db.get_all_members():
-            email = (record.get("mp_email") or "").strip().lower()
-            info = tenure.get(email) if email else None
-            if not info or not info["active"] or info["years"] < 1:
+        for discord_id, info in targets:
+            if not info["active"] or info["years"] < 1:
                 continue
-            if not db.notice_sent("milestone_notices", record["discord_id"], info["years"]):
+            if not db.notice_sent("milestone_notices", discord_id, info["years"]):
                 pending += 1
 
         if pending > MILESTONE_FLOOD_LIMIT:
@@ -437,16 +437,7 @@ class CougConnectBot(commands.Bot):
             return
 
         announced = 0
-        for record in db.get_all_members():
-            email = (record.get("mp_email") or "").strip().lower()
-            if not email:
-                continue
-            info = tenure.get(email)
-            if not info:
-                continue
-
-            discord_id = record["discord_id"]
-
+        for discord_id, info in targets:
             # Not currently paying: no announcement, and take the badge back.
             if not info["active"]:
                 try:
@@ -471,7 +462,7 @@ class CougConnectBot(commands.Bot):
                 await assign_milestone_role(int(discord_id), years)
                 await channel.send(
                     f"🎉 Shoutout to <@{discord_id}> — **{label}** with CougConnect "
-                    f"as a **{tier_label(info['tier'] or record['tier'])}** member! "
+                    f"as a **{tier_label(info['tier'])}** member! "
                     f"Thanks for backing the Cougs with us. 🏈"
                 )
                 announced += 1
@@ -768,6 +759,43 @@ async def assign_apartment_role(discord_id: int, slug: str | None) -> None:
         await member.remove_roles(*to_remove, reason="CougConnect apartment sync")
     if target_role and target_role not in member.roles:
         await member.add_roles(target_role, reason=f"CougConnect apartment: {slug}")
+
+
+def _milestone_targets(tenure: dict) -> list[tuple[str, dict]]:
+    """Everyone we can reach on Discord, from BOTH linking systems.
+
+    CougConnect links members to Discord two independent ways and neither is
+    complete: the ExpressTech MemberPress-Discord plugin writes
+    _ets_memberpress_discord_user_id in WordPress (and the tenure endpoint hands
+    that back as discord_id), while the bot keeps its own member_links from the
+    verify button. Iterating member_links alone loses everyone in the first
+    group — they hold a tier role granted by the WordPress plugin but the bot
+    has never heard of them, so they never get a tenure role.
+
+    Keyed by EMAIL rather than discord_id on purpose: if the two systems
+    disagree about someone's Discord account, a discord_id key would role both
+    of them. This way each member resolves to exactly one ID.
+
+    Returns [(discord_id, tenure_info), ...].
+    """
+    by_email: dict[str, tuple[str, dict]] = {}
+
+    for email, info in tenure.items():
+        discord_id = str(info.get("discord_id") or "")
+        if discord_id:
+            by_email[email] = (discord_id, info)
+
+    # The bot's own link wins on conflict — the member made it themselves, it is
+    # what /get-info reports, and it is the more recently confirmed of the two.
+    for record in db.get_all_members():
+        email = (record.get("mp_email") or "").strip().lower()
+        if not email:
+            continue
+        info = tenure.get(email)
+        if info:
+            by_email[email] = (str(record["discord_id"]), info)
+
+    return list(by_email.values())
 
 
 def _resolve_milestone_role(guild: discord.Guild, cfg: dict) -> discord.Role | None:
@@ -1391,13 +1419,9 @@ async def seed_milestones(interaction: discord.Interaction):
     skipped_lapsed = 0
     corrected = 0
 
-    for record in db.get_all_members():
-        email = (record.get("mp_email") or "").strip().lower()
-        info = tenure.get(email) if email else None
-        if not info or info["years"] < 1:
+    for discord_id, info in _milestone_targets(tenure):
+        if info["years"] < 1:
             continue
-
-        discord_id = record["discord_id"]
 
         # Tenure can be recalculated downward — overlapping memberships used to
         # be double-counted — so drop notices for years they have not actually
