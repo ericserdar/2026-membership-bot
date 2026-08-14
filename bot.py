@@ -213,10 +213,12 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=10, minute=0, tzinfo=datetime.timezone.utc))  # 3am MST (UTC-7)
     async def sync_all_members_task(self):
-        members = db.get_all_members()
+        members, adopted = await _tier_sync_records()
         if not members:
             return
-        log.info(f"Starting periodic sync for {len(members)} linked members...")
+        if adopted:
+            log.info(f"Tier sync: {adopted} member(s) linked in WordPress only, not in member_links — including them")
+        log.info(f"Starting periodic sync for {len(members)} linked members ({adopted} WordPress-only)...")
         changed = await sync_members(members, reason="auto-sync", delay_between=5)
         log.info(f"Periodic sync complete. {changed} role(s) updated out of {len(members)} members.")
 
@@ -801,6 +803,53 @@ def _milestone_targets(tenure: dict) -> list[tuple[str, dict]]:
     return list(by_email.values())
 
 
+async def _tier_sync_records() -> tuple[list[dict], int]:
+    """Members for the nightly tier sync, from BOTH Discord linking systems.
+
+    Same gap as _milestone_targets, but for tier roles: db.get_all_members()
+    only knows members who pressed the verify button. Members linked by the
+    ExpressTech MemberPress-Discord plugin hold tier roles the bot has never
+    seen, so the bot never downgrades them when they stop paying and never
+    upgrades them when they change tier — the plugin's own sync is the only
+    thing touching them.
+
+    Strictly additive: every existing db record is returned untouched, plus a
+    synthesised record for each tenure entry with a discord_id whose email the
+    db doesn't already have. Synthesised records carry mp_member_id=0 (sync
+    falls back to the email lookup, then persists the real ID) and the tier the
+    tenure endpoint reports, so a member who currently looks paid still gets the
+    30-second double-check before any downgrade.
+
+    Returns (records, adopted_count).
+    """
+    records = list(db.get_all_members())
+    known = {(r.get("mp_email") or "").strip().lower() for r in records}
+    known.discard("")
+
+    tenure = await mp.get_tenure_map()
+    if tenure is None:
+        # Endpoint down — sync the members we do know rather than skipping the
+        # night entirely. Same convention as everywhere else: None changes nothing.
+        log.warning("Tier sync: tenure unavailable, syncing bot-linked members only")
+        return records, 0
+
+    adopted = 0
+    for email, info in tenure.items():
+        discord_id = str(info.get("discord_id") or "")
+        if not discord_id or email in known:
+            continue
+        tier = info.get("tier") or ""
+        records.append({
+            "discord_id": discord_id,
+            "mp_member_id": 0,
+            "mp_email": email,
+            "tier": tier if tier in ("gold", "silver", "insider") else "none",
+        })
+        adopted += 1
+
+    return records, adopted
+
+
 def _resolve_milestone_role(guild: discord.Guild, cfg: dict) -> discord.Role | None:
     """Resolve a tenure role by ID (preferred) or exact name."""
     rid = cfg.get("role_id") or 0
@@ -814,7 +863,7 @@ def _resolve_milestone_role(guild: discord.Guild, cfg: dict) -> discord.Role | N
     return None
 
 
-async def assign_milestone_role(discord_id: int, years: int | None) -> None:
+async def assign_milestone_role(discord_id: int, years: int | None) -> bool:
     """Grant the tenure role for `years` and remove any other tenure role.
 
     Modelled on assign_apartment_role, NOT assign_role: assign_role deliberately
@@ -824,18 +873,23 @@ async def assign_milestone_role(discord_id: int, years: int | None) -> None:
 
     years=None clears every tenure role — used when a member is no longer
     subscribed, so nobody wears a badge they aren't currently paying for.
+
+    Returns True if Discord roles were actually changed, False if the member
+    already had exactly the right role. Callers use this to skip their rate-limit
+    sleep when no API call was made — a repeat seed over ~700 already-correct
+    members otherwise spends minutes sleeping between no-ops.
     """
     if not MILESTONES:
-        return
+        return False
     guild = get_guild()
     if not guild:
-        return
+        return False
     member = guild.get_member(discord_id)
     if not member:
         try:
             member = await guild.fetch_member(discord_id)
         except discord.NotFound:
-            return
+            return False
 
     years_to_role: dict[int, discord.Role] = {}
     for cfg in MILESTONES:
@@ -858,10 +912,14 @@ async def assign_milestone_role(discord_id: int, years: int | None) -> None:
     milestone_roles = set(years_to_role.values())
     to_remove = [r for r in member.roles if r in milestone_roles and r != target_role]
 
+    changed = False
     if to_remove:
         await member.remove_roles(*to_remove, reason="CougConnect tenure sync")
+        changed = True
     if target_role and target_role not in member.roles:
         await member.add_roles(target_role, reason=f"CougConnect tenure: {years} years")
+        changed = True
+    return changed
 
 
 async def sync_members(members: list, reason: str, delay_between: float) -> int:
@@ -871,6 +929,11 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
     404 / API failure) is SKIPPED — their role is left untouched — rather than
     being treated as unsubscribed. Downgrades are only applied when we get a real
     member object showing no active memberships, and are double-checked after 30s.
+
+    Records may come from member_links or, via _tier_sync_records(), from the
+    WordPress-side link with mp_member_id=0 — those resolve by email on the first
+    pass and store their real ID.
+
     Returns the number of roles changed.
     """
     changed = 0
@@ -885,6 +948,12 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
                 await asyncio.sleep(delay_between)
                 continue
             apartment_slug = mp.get_apartment_slug(member_obj) if member_obj else None
+            # Members adopted from the WordPress-only link arrive with
+            # mp_member_id=0 and were resolved by email. Persist the real ID so
+            # the next sync hits /members/{id} directly instead of searching.
+            mp_id = record["mp_member_id"]
+            if member_obj and member_obj.get("id"):
+                mp_id = int(member_obj["id"])
             if new_tier != record["tier"]:
                 if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
                     await asyncio.sleep(30)
@@ -895,7 +964,7 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
                     elif verify_tier == "unsubscribed":
                         log.info(f"{reason} confirmed downgrade for discord_id={record['discord_id']} ({record['mp_email']}) — tier {record['tier']} → unsubscribed")
                         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"{reason}:confirmed")
-                        db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], "unsubscribed")
+                        db.upsert_member(record["discord_id"], mp_id, record["mp_email"], "unsubscribed")
                         await assign_role(int(record["discord_id"]), "unsubscribed")
                         await assign_apartment_role(int(record["discord_id"]), None)
                         changed += 1
@@ -904,12 +973,12 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
                 else:
                     log.info(f"{reason}: discord_id={record['discord_id']} tier {record['tier']} → {new_tier}")
                     db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], new_tier, reason=reason)
-                    db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                    db.upsert_member(record["discord_id"], mp_id, record["mp_email"], new_tier)
                     await assign_role(int(record["discord_id"]), new_tier)
                     await assign_apartment_role(int(record["discord_id"]), apartment_slug)
                     changed += 1
             else:
-                db.upsert_member(record["discord_id"], record["mp_member_id"], record["mp_email"], new_tier)
+                db.upsert_member(record["discord_id"], mp_id, record["mp_email"], new_tier)
                 # Keep apartment role in sync even when tier is unchanged (member may
                 # have set/changed their housing on the website since last sync).
                 if new_tier in ("gold", "silver", "insider"):
@@ -1419,6 +1488,7 @@ async def seed_milestones(interaction: discord.Interaction):
 
     seeded = 0
     roled = 0
+    already_correct = 0
     skipped_lapsed = 0
     corrected = 0
 
@@ -1441,19 +1511,27 @@ async def seed_milestones(interaction: discord.Interaction):
             continue
 
         try:
-            await assign_milestone_role(int(discord_id), info["years"])
-            roled += 1
+            # Only sleep when the call actually hit the Discord API. A repeat seed
+            # is almost entirely no-ops, and sleeping through those turned a fast
+            # re-run into a five-minute one for nothing.
+            if await assign_milestone_role(int(discord_id), info["years"]):
+                roled += 1
+                await asyncio.sleep(0.5)
+            else:
+                already_correct += 1
         except Exception as e:
             log.error(f"Seed role failed for discord_id={discord_id}: {e}")
-        await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5)
 
     await post_admin_log(
         f"🌱 Milestone seed: {seeded} member(s) recorded, {roled} role(s) applied, "
+        f"{already_correct} already correct, "
         f"{skipped_lapsed} lapsed skipped, {corrected} stale notice(s) cleared. "
         f"No announcements sent."
     )
     await interaction.followup.send(
         f"✅ Seeded **{seeded}** member(s) — **{roled}** role(s) applied, "
+        f"**{already_correct}** already correct, "
         f"**{skipped_lapsed}** lapsed skipped, **{corrected}** stale notice(s) cleared.\n"
         f"Nothing was announced. The next milestone run will only post genuinely new ones.",
         ephemeral=True,

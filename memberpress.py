@@ -188,9 +188,17 @@ async def get_member_and_active_ids(mp_member_id: int, mp_email: str = "") -> tu
     """
     import logging
     log = logging.getLogger("cougconnect")
-    member = await get_member_by_id(mp_member_id)
+    # NEVER call /members/{id} with a falsy ID. This install does not 404 on
+    # /members/0 — it returns an arbitrary member object. Passing 0 through would
+    # silently resolve every caller to that same stranger's tier. Callers that
+    # only know an email (e.g. members adopted from the WordPress-side Discord
+    # link) pass mp_member_id=0 on purpose and must go straight to the search.
+    member = await get_member_by_id(mp_member_id) if mp_member_id and mp_member_id > 0 else None
     if not member:
-        log.warning(f"Fallback: get_member_by_id({mp_member_id}) returned None — trying email lookup")
+        if mp_member_id and mp_member_id > 0:
+            log.warning(f"Fallback: get_member_by_id({mp_member_id}) returned None — trying email lookup")
+        else:
+            log.debug(f"No MemberPress ID for {mp_email} — resolving by email")
         if mp_email:
             member = await get_member_by_email(mp_email)
         if not member:
