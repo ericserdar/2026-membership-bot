@@ -94,10 +94,11 @@ def _load_apartments() -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-# A normal day produces at most one or two milestones. Anything above this in a
-# single run means something is wrong — most likely the seed never ran — so the
-# task refuses rather than dumping hundreds of posts in the channel.
-MILESTONE_FLOOD_LIMIT = int(os.getenv("MILESTONE_FLOOD_LIMIT", "10"))
+# Big signup days produce big anniversary days exactly a year later, and those
+# members have all genuinely earned the shoutout — so a large batch is never a
+# reason to hold the run back. This only decides when the admin log gets a
+# heads-up, so an unexpected flood is still visible rather than silent.
+MILESTONE_BATCH_NOTICE = int(os.getenv("MILESTONE_BATCH_NOTICE", "25"))
 
 UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nudge
 UPGRADE_NUDGE_DAILY_CAP = 50  # spread large cohorts over multiple days
@@ -417,8 +418,9 @@ class CougConnectBot(commands.Bot):
             log.warning("Milestone run skipped: tenure unavailable")
             return
 
-        # First pass: who would be announced? A large number means the backfill
-        # was never seeded, and announcing them all would be a disaster.
+        # Count first, so a big batch can be flagged in the admin log before the
+        # posts start landing. It never blocks the run: 30 people who signed up
+        # on the same day a year ago all deserve the shoutout on the same day.
         targets = _milestone_targets(tenure)
 
         pending = 0
@@ -428,13 +430,14 @@ class CougConnectBot(commands.Bot):
             if not db.notice_sent("milestone_notices", discord_id, info["years"]):
                 pending += 1
 
-        if pending > MILESTONE_FLOOD_LIMIT:
-            log.error(f"Milestone run aborted: {pending} pending exceeds limit {MILESTONE_FLOOD_LIMIT}")
+        if pending > MILESTONE_BATCH_NOTICE:
+            log.info(f"Milestone run: large batch of {pending} pending")
             await post_admin_log(
-                f"⚠️ Milestone run **aborted** — {pending} members would have been announced at once "
-                f"(limit {MILESTONE_FLOOD_LIMIT}). Run `/seed-milestones` first, then it will resume normally."
+                f"📣 Heads up — today's milestone run is announcing **{pending}** members. "
+                f"A big signup day a year ago will do that. If this looks wrong, the usual "
+                f"cause is milestone_notices having been lost; `/seed-milestones` re-records "
+                f"everyone silently."
             )
-            return
 
         announced = 0
         for discord_id, info in targets:
