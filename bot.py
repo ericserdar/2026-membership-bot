@@ -100,6 +100,12 @@ def _load_apartments() -> dict:
 # heads-up, so an unexpected flood is still visible rather than silent.
 MILESTONE_BATCH_NOTICE = int(os.getenv("MILESTONE_BATCH_NOTICE", "25"))
 
+# Let the nightly tier sync act on members linked only in WordPress (the
+# ExpressTech plugin), not just those in member_links. Off by default: their
+# first sync can move many roles at once, so preview with /tier-sync-preview
+# before turning it on.
+TIER_SYNC_INCLUDE_WP_LINKED = os.getenv("TIER_SYNC_INCLUDE_WP_LINKED", "").strip().lower() in ("1", "true", "yes", "on")
+
 UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nudge
 UPGRADE_NUDGE_DAILY_CAP = 50  # spread large cohorts over multiple days
 WINBACK_DAYS = 30
@@ -218,6 +224,8 @@ class CougConnectBot(commands.Bot):
             return
         if adopted:
             log.info(f"Tier sync: {adopted} member(s) linked in WordPress only, not in member_links — including them")
+        elif not TIER_SYNC_INCLUDE_WP_LINKED:
+            log.info("Tier sync: WordPress-only members excluded (TIER_SYNC_INCLUDE_WP_LINKED not set)")
         log.info(f"Starting periodic sync for {len(members)} linked members ({adopted} WordPress-only)...")
         changed = await sync_members(members, reason="auto-sync", delay_between=5)
         log.info(f"Periodic sync complete. {changed} role(s) updated out of {len(members)} members.")
@@ -803,7 +811,7 @@ def _milestone_targets(tenure: dict) -> list[tuple[str, dict]]:
     return list(by_email.values())
 
 
-async def _tier_sync_records() -> tuple[list[dict], int]:
+async def _tier_sync_records(force_adopt: bool = False) -> tuple[list[dict], int]:
     """Members for the nightly tier sync, from BOTH Discord linking systems.
 
     Same gap as _milestone_targets, but for tier roles: db.get_all_members()
@@ -820,9 +828,17 @@ async def _tier_sync_records() -> tuple[list[dict], int]:
     tenure endpoint reports, so a member who currently looks paid still gets the
     30-second double-check before any downgrade.
 
+    Adoption is OFF until TIER_SYNC_INCLUDE_WP_LINKED is set — these members have
+    never been synced by the bot, so their first pass can move a lot of roles at
+    once. Preview it with /tier-sync-preview (which passes force_adopt=True and
+    writes nothing), then set the env var to let the nightly sync act on it.
+
     Returns (records, adopted_count).
     """
     records = list(db.get_all_members())
+    if not (force_adopt or TIER_SYNC_INCLUDE_WP_LINKED):
+        return records, 0
+
     known = {(r.get("mp_email") or "").strip().lower() for r in records}
     known.discard("")
 
@@ -1536,6 +1552,84 @@ async def seed_milestones(interaction: discord.Interaction):
         f"Nothing was announced. The next milestone run will only post genuinely new ones.",
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="tier-sync-preview", description="Dry run: what the nightly tier sync would change (writes nothing)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(only_new="Only check members the bot has never synced (WordPress-linked only). Default true.")
+async def tier_sync_preview(interaction: discord.Interaction, only_new: bool = True):
+    """Report what sync_all_members_task would do, without touching anything.
+
+    Exists because _tier_sync_records() adopts members the bot has never seen —
+    their first sync could move a lot of roles at once, and that deserves eyes on
+    it before it runs unattended at 3am. Deliberately does no db writes and no
+    role changes: it only reads MemberPress.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    records, adopted = await _tier_sync_records(force_adopt=True)
+    if adopted == 0 and only_new:
+        await interaction.followup.send(
+            "✅ No WordPress-only members to adopt — `member_links` already covers "
+            "everyone the tenure endpoint knows about. Run with `only_new: False` "
+            "to preview the full sync.",
+            ephemeral=True,
+        )
+        return
+
+    # Adopted records are the tail of the list, in the order _tier_sync_records
+    # appended them.
+    targets = records[len(records) - adopted:] if only_new else records
+
+    # A deferred interaction can only be followed up for 15 minutes and each
+    # member costs ~0.7s, so cap the walk and say so rather than timing out
+    # halfway with a report that looks complete.
+    PREVIEW_CAP = 900
+    truncated = max(0, len(targets) - PREVIEW_CAP)
+    targets = targets[:PREVIEW_CAP]
+
+    changes: list[str] = []
+    unreachable = 0
+    unchanged = 0
+    counts: dict[str, int] = {}
+
+    for record in targets:
+        try:
+            new_tier, _ = await mp.resolve_tier_or_none(record["mp_member_id"], record["mp_email"])
+        except Exception as e:
+            log.error(f"tier-sync-preview error for {record['mp_email']}: {e}")
+            unreachable += 1
+            continue
+        if new_tier is None:
+            unreachable += 1
+        elif new_tier != record["tier"]:
+            counts[f"{record['tier']} → {new_tier}"] = counts.get(f"{record['tier']} → {new_tier}", 0) + 1
+            changes.append(f"{record['mp_email']} <@{record['discord_id']}> {record['tier']} → {new_tier}")
+        else:
+            unchanged += 1
+        await asyncio.sleep(0.3)
+
+    summary = (
+        f"**Tier sync dry run** — {'WordPress-only members' if only_new else 'all linked members'}\n"
+        f"Checked **{len(targets)}** · **{len(changes)}** would change · "
+        f"**{unchanged}** already correct · **{unreachable}** unreachable (would be skipped)\n"
+    )
+    if counts:
+        summary += "\n".join(f"• `{k}` — **{v}**" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+    if truncated:
+        summary += f"\n⚠️ Stopped after {PREVIEW_CAP} — **{truncated}** member(s) not checked."
+    summary += "\n\n_Nothing was changed._"
+
+    if changes:
+        import io
+        buf = io.BytesIO("\n".join(changes).encode("utf-8"))
+        await interaction.followup.send(
+            summary,
+            file=discord.File(buf, filename="tier-sync-preview.txt"),
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(summary, ephemeral=True)
 
 
 @bot.tree.command(name="pending-links", description="List paying MemberPress accounts not linked to Discord")
