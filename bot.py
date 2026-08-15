@@ -822,8 +822,14 @@ async def _tier_sync_records(force_adopt: bool = False) -> tuple[list[dict], int
     thing touching them.
 
     Strictly additive: every existing db record is returned untouched, plus a
-    synthesised record for each tenure entry with a discord_id whose email the
-    db doesn't already have. Synthesised records carry mp_member_id=0 (sync
+    synthesised record for each tenure entry whose email AND discord_id the db
+    doesn't already have. The discord_id check matters as much as the email one:
+    when an admin /link-member points a Discord user at a different MemberPress
+    account than the WordPress-side link knows about (duplicate accounts), the
+    old email stops matching any db record — adopting it would synthesise a
+    stale record for the same discord_id that runs after the good one and
+    overwrites both the role and the stored link. The bot's own link always
+    wins. Synthesised records carry mp_member_id=0 (sync
     falls back to the email lookup, then persists the real ID) and the tier the
     tenure endpoint reports, so a member who currently looks paid still gets the
     30-second double-check before any downgrade.
@@ -841,6 +847,8 @@ async def _tier_sync_records(force_adopt: bool = False) -> tuple[list[dict], int
 
     known = {(r.get("mp_email") or "").strip().lower() for r in records}
     known.discard("")
+    known_ids = {str(r.get("discord_id") or "") for r in records}
+    known_ids.discard("")
 
     tenure = await mp.get_tenure_map()
     if tenure is None:
@@ -852,7 +860,7 @@ async def _tier_sync_records(force_adopt: bool = False) -> tuple[list[dict], int
     adopted = 0
     for email, info in tenure.items():
         discord_id = str(info.get("discord_id") or "")
-        if not discord_id or email in known:
+        if not discord_id or email in known or discord_id in known_ids:
             continue
         tier = info.get("tier") or ""
         records.append({
@@ -971,7 +979,10 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
             if member_obj and member_obj.get("id"):
                 mp_id = int(member_obj["id"])
             if new_tier != record["tier"]:
-                if new_tier == "unsubscribed" and record["tier"] in ("gold", "silver", "insider"):
+                # Double-check EVERY downgrade, including records adopted from the
+                # WordPress-side link (tier "none") — those used to skip this guard,
+                # so one transiently-empty active_memberships response demoted them.
+                if new_tier == "unsubscribed" and record["tier"] != "unsubscribed":
                     await asyncio.sleep(30)
                     verify_tier, _ = await mp.resolve_tier_or_none(record["mp_member_id"], record["mp_email"])
                     if verify_tier is None:
