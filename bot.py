@@ -2024,6 +2024,28 @@ async def process_webhook_event(event: str, mp_member_id: int, record: dict):
     discord_id = int(record["discord_id"])
 
     if event in INACTIVE_EVENTS:
+        # "Expired" does not always mean "no longer paying": a tier upgrade
+        # creates the new subscription and then expires the OLD one, so this
+        # event fires minutes after an upgrade for a member who is actively
+        # paying. Verify against MemberPress before demoting.
+        current_tier, member_obj = await mp.resolve_tier_or_none(mp_member_id, record["mp_email"])
+        if current_tier is None:
+            log.warning(f"Webhook {event} for discord_id={discord_id}: MemberPress unreachable — leaving role unchanged")
+            await post_admin_log(
+                f"⚠️ **Expiry webhook unverifiable** — <@{discord_id}> (`{record['mp_email']}`)\n"
+                f"Event `{event}` fired but MemberPress could not be reached to confirm. "
+                f"Role left unchanged; use `/sync-member` to re-check."
+            )
+            return
+        if current_tier != "unsubscribed":
+            # Still holds an active membership (e.g. the expired sub was
+            # replaced by an upgrade). Record the real tier instead of demoting.
+            db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], current_tier, reason=f"webhook:{event}:still-active")
+            db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], current_tier)
+            await assign_role(discord_id, current_tier)
+            await assign_apartment_role(discord_id, mp.get_apartment_slug(member_obj) if member_obj else None)
+            log.info(f"Webhook {event} for discord_id={discord_id}: still {current_tier} in MemberPress — not demoting")
+            return
         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"webhook:{event}")
         db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], "unsubscribed")
         await assign_role(discord_id, "unsubscribed")
