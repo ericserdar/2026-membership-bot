@@ -209,6 +209,10 @@ async def handle_news_json(request: web.Request) -> web.Response:
     items = await asyncio.to_thread(
         db.get_recent_news, limit, request.query.get("all") == "1"
     )
+    names = {s["id"]: s["name"] for s in load_feeds()}
+    for item in items:
+        item["source_name"] = names.get(item["source"], item["source"])
+        item["emoji"] = KIND_DEFAULTS.get(item["kind"], ("🔗", 0))[0]
     return web.json_response(
         {"updated": datetime.now(timezone.utc).isoformat(), "items": items},
         headers={
