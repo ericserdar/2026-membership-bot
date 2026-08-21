@@ -131,17 +131,37 @@ def thread_name(item: dict, source_cfg: dict) -> str:
     return f"{emoji} {item['title']}"[:100]
 
 
-async def send_item(channel, item: dict, source_cfg: dict):
-    """Post one item: a forum post in a forum channel, else a plain message."""
+# SUPPRESS_NOTIFICATIONS — posts arrive without pinging anyone (like @silent).
+SILENT_FLAG = 1 << 12
+
+
+async def send_item(session: aiohttp.ClientSession, channel, item: dict, source_cfg: dict):
+    """Post one item silently: a forum post in a forum channel, else a message.
+
+    discord.py can't set SUPPRESS_NOTIFICATIONS on a forum starter message,
+    so the forum path hits the REST endpoint directly.
+    """
     embed = build_embed(item, source_cfg)
     if isinstance(channel, discord.ForumChannel):
-        await channel.create_thread(
-            name=thread_name(item, source_cfg),
-            embed=embed,
-            auto_archive_duration=10080,
-        )
+        payload = {
+            "name": thread_name(item, source_cfg),
+            "auto_archive_duration": 10080,
+            "message": {"embeds": [embed.to_dict()], "flags": SILENT_FLAG},
+        }
+        headers = {"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN', '')}"}
+        for _ in range(3):
+            async with session.post(
+                f"https://discord.com/api/v10/channels/{channel.id}/threads",
+                json=payload, headers=headers, timeout=FETCH_TIMEOUT,
+            ) as resp:
+                if resp.status == 429:
+                    data = await resp.json()
+                    await asyncio.sleep(float(data.get("retry_after", 2)) + 0.5)
+                    continue
+                resp.raise_for_status()
+                return
     else:
-        await channel.send(embed=embed)
+        await channel.send(embed=embed, silent=True)
 
 
 async def _handle_feed_failure(source_cfg: dict, error: Exception, post_admin_log):
@@ -184,7 +204,7 @@ async def _process_source(session, channel, source_cfg: dict, post_admin_log) ->
 
     if channel is not None:
         for item in reversed(to_post):  # oldest first, so the channel reads chronologically
-            await send_item(channel, item, source_cfg)
+            await send_item(session, channel, item, source_cfg)
             db.mark_news_posted(src_id, item["guid"])
             await asyncio.sleep(1)
 
