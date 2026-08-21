@@ -163,10 +163,11 @@ async def _process_source(session, channel, source_cfg: dict, post_admin_log) ->
                 and datetime.fromisoformat(item["published_at"]) >= cutoff):
             to_post.append(item)
 
-    for item in reversed(to_post):  # oldest first, so the channel reads chronologically
-        await channel.send(embed=build_embed(item, source_cfg))
-        db.mark_news_posted(src_id, item["guid"])
-        await asyncio.sleep(1)
+    if channel is not None:
+        for item in reversed(to_post):  # oldest first, so the channel reads chronologically
+            await channel.send(embed=build_embed(item, source_cfg))
+            db.mark_news_posted(src_id, item["guid"])
+            await asyncio.sleep(1)
 
     if _fail_counts.pop(src_id, 0) >= ALERT_AFTER_FAILURES:
         _last_alert.pop(src_id, None)
@@ -177,15 +178,15 @@ async def _process_source(session, channel, source_cfg: dict, post_admin_log) ->
 async def poll_feeds(bot, channel_id: int, post_admin_log):
     """One polling cycle over every enabled source. Called by bot.news_task."""
     global _warned_no_channel
+    # No channel yet? Still fetch and store, so /news.json (the website feed)
+    # works and sources get seeded — only the Discord posting waits.
     channel = bot.get_channel(channel_id) if channel_id else None
-    if channel is None:
-        if not _warned_no_channel:
-            _warned_no_channel = True
-            await post_admin_log(
-                "📰 News aggregator is idle — set DISCORD_NEWS_CHANNEL_ID to the "
-                "#byu-news channel ID to activate it."
-            )
-        return
+    if channel is None and not _warned_no_channel:
+        _warned_no_channel = True
+        await post_admin_log(
+            "📰 News aggregator is collecting for the website, but Discord posting "
+            "is off — set DISCORD_NEWS_CHANNEL_ID to the #byu-news channel ID."
+        )
 
     backfilled = 0
     async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
