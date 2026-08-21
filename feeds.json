@@ -1,0 +1,14 @@
+[
+  {"id": "vanquish-the-foe",  "name": "Vanquish the Foe",       "url": "https://www.vanquishthefoe.com/rss/index.xml", "kind": "article", "enabled": true},
+  {"id": "deseret-byu",       "name": "Deseret News",           "url": "https://www.deseret.com/arc/outboundfeeds/rss/category/sports/byu-cougars/?outputType=xml", "kind": "article", "enabled": true},
+  {"id": "sltrib-byu",        "name": "Salt Lake Tribune",      "url": "https://www.sltrib.com/arc/outboundfeeds/rss/category/sports/byu-cougars/?outputType=xml", "kind": "article", "enabled": true},
+  {"id": "byucougars",        "name": "BYU Cougars (official)", "url": "https://byucougars.com/rss", "kind": "article", "enabled": true},
+  {"id": "locked-on-cougars", "name": "Locked On Cougars",      "url": "https://feeds.simplecast.com/DzohBBeS", "kind": "podcast", "enabled": true},
+  {"id": "locked-on-big12",   "name": "Locked On Big 12",       "url": "https://feeds.simplecast.com/tCmD8cjX", "kind": "podcast", "enabled": true},
+  {"id": "ben-criddle",       "name": "Ben Criddle Show",       "url": "https://www.spreaker.com/show/1369939/episodes/feed", "kind": "podcast", "enabled": true},
+  {"id": "byu-sports-nation", "name": "BYU Sports Nation",      "url": "https://www.byuradio.org/rss/showpodcastfeed/21cd2aa7-ebee-444d-8cdc-2111295d90f7", "kind": "podcast", "enabled": true},
+  {"id": "yt-byucougars",     "name": "BYU Cougars on YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCreL2UlUK2cV2OXZ4SGstBQ", "kind": "video", "enabled": true},
+  {"id": "yt-byutv-sn",       "name": "BYUtv Sports Nation",    "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCPGJ6U6tzIKHubr5zFWFZLw", "kind": "video", "enabled": true},
+  {"id": "yt-locked-on-b12",  "name": "Locked On Big 12 (YouTube)", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCIaiqufEekxiTnnLc129t2g", "kind": "video", "enabled": true},
+  {"id": "cougconnect",       "name": "CougConnect",            "url": "https://cougconnect.com/feed/", "kind": "cougconnect", "enabled": true}
+]

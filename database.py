@@ -99,6 +99,24 @@ def init_db():
                 flagged_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS news_items (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                source         TEXT NOT NULL,
+                guid           TEXT NOT NULL,
+                title          TEXT NOT NULL,
+                url            TEXT NOT NULL,
+                kind           TEXT NOT NULL,
+                thumbnail      TEXT,
+                published_at   TEXT,
+                first_seen_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                discord_posted INTEGER DEFAULT 0,
+                UNIQUE (source, guid)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_news_published ON news_items (published_at DESC)"
+        )
         conn.commit()
 
 
@@ -491,3 +509,50 @@ def get_flag_totals(top: int = 15) -> dict:
         "last30": last30,
         "by_author": [{"author_id": r[0], "author_name": r[1], "count": r[2]} for r in rows],
     }
+
+
+# ── News aggregator ───────────────────────────────────────────────────────────
+
+def news_source_seeded(source: str) -> bool:
+    """True once a source has any rows — its first poll seeds silently."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM news_items WHERE source = ? LIMIT 1", (source,)
+        ).fetchone()
+    return row is not None
+
+
+def insert_news_item(source: str, guid: str, title: str, url: str, kind: str,
+                     thumbnail: str | None, published_at: str,
+                     discord_posted: int = 0) -> bool:
+    """Insert an item if unseen. Returns True only when the row is new."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO news_items "
+            "(source, guid, title, url, kind, thumbnail, published_at, discord_posted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (source, guid, title, url, kind, thumbnail, published_at, discord_posted),
+        )
+        conn.commit()
+    return cur.rowcount == 1
+
+
+def mark_news_posted(source: str, guid: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE news_items SET discord_posted = 1 WHERE source = ? AND guid = ?",
+            (source, guid),
+        )
+        conn.commit()
+
+
+def get_recent_news(limit: int = 30, include_cougconnect: bool = False) -> list[dict]:
+    query = ("SELECT source, title, url, kind, thumbnail, published_at FROM news_items "
+             + ("" if include_cougconnect else "WHERE kind != 'cougconnect' ")
+             + "ORDER BY published_at DESC LIMIT ?")
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(query, (limit,)).fetchall()
+    return [
+        dict(zip(["source", "title", "url", "kind", "thumbnail", "published_at"], row))
+        for row in rows
+    ]

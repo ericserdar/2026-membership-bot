@@ -30,6 +30,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+import aggregator
 import database as db
 import memberpress as mp
 
@@ -70,6 +71,10 @@ ROLE_IDS = {
 }
 
 GENERAL_CHANNEL_ID = int(os.getenv("DISCORD_GENERAL_CHANNEL_ID", "1050165331894751314"))
+
+# #byu-news content aggregator. Unset (0) leaves the task idling with a single
+# admin-log heads-up, so the code can deploy before the channel exists.
+NEWS_CHANNEL_ID = int(os.getenv("DISCORD_NEWS_CHANNEL_ID", "0"))
 
 # Membership milestones post here. Falls back to general so an unset value can
 # never silence the feature outright.
@@ -163,6 +168,7 @@ class CougConnectBot(commands.Bot):
         self.sponsor_spotlight_task.start()
         self.weekly_digest_task.start()
         self.gameday_thread_task.start()
+        self.news_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -640,6 +646,18 @@ class CougConnectBot(commands.Bot):
 
     @gameday_thread_task.before_loop
     async def before_gameday(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=20)
+    async def news_task(self):
+        """Poll BYU content feeds and post new items to #byu-news."""
+        try:
+            await aggregator.poll_feeds(self, NEWS_CHANNEL_ID, post_admin_log)
+        except Exception as e:
+            log.error(f"News aggregator cycle failed: {e}")
+
+    @news_task.before_loop
+    async def before_news(self):
         await self.wait_until_ready()
 
 
@@ -2157,6 +2175,7 @@ async def start_web_server():
     app.router.add_get("/verify-page", handle_verify_page_get)
     app.router.add_post("/verify-page", handle_verify_page_post)
     app.router.add_post("/webhook", handle_legacy_webhook)
+    app.router.add_get("/news.json", aggregator.handle_news_json)
     if WEBHOOK_URL_TOKEN:
         app.router.add_post(f"/webhook/{WEBHOOK_URL_TOKEN}", handle_webhook)
     runner = web.AppRunner(app)
