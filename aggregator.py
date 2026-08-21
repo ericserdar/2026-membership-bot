@@ -125,6 +125,25 @@ def build_embed(item: dict, source_cfg: dict) -> discord.Embed:
     return embed
 
 
+def thread_name(item: dict, source_cfg: dict) -> str:
+    emoji, _ = KIND_DEFAULTS[source_cfg["kind"]]
+    emoji = source_cfg.get("emoji", emoji)
+    return f"{emoji} {item['title']}"[:100]
+
+
+async def send_item(channel, item: dict, source_cfg: dict):
+    """Post one item: a forum post in a forum channel, else a plain message."""
+    embed = build_embed(item, source_cfg)
+    if isinstance(channel, discord.ForumChannel):
+        await channel.create_thread(
+            name=thread_name(item, source_cfg),
+            embed=embed,
+            auto_archive_duration=10080,
+        )
+    else:
+        await channel.send(embed=embed)
+
+
 async def _handle_feed_failure(source_cfg: dict, error: Exception, post_admin_log):
     src_id = source_cfg["id"]
     _fail_counts[src_id] = _fail_counts.get(src_id, 0) + 1
@@ -165,7 +184,7 @@ async def _process_source(session, channel, source_cfg: dict, post_admin_log) ->
 
     if channel is not None:
         for item in reversed(to_post):  # oldest first, so the channel reads chronologically
-            await channel.send(embed=build_embed(item, source_cfg))
+            await send_item(channel, item, source_cfg)
             db.mark_news_posted(src_id, item["guid"])
             await asyncio.sleep(1)
 
