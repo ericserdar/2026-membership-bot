@@ -117,6 +117,12 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_news_published ON news_items (published_at DESC)"
         )
+        # Columns added after launch; ALTER is a no-op error once they exist.
+        for col_decl in ("summary TEXT", "suppressed INTEGER DEFAULT 0"):
+            try:
+                conn.execute(f"ALTER TABLE news_items ADD COLUMN {col_decl}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -524,17 +530,46 @@ def news_source_seeded(source: str) -> bool:
 
 def insert_news_item(source: str, guid: str, title: str, url: str, kind: str,
                      thumbnail: str | None, published_at: str,
-                     discord_posted: int = 0) -> bool:
-    """Insert an item if unseen. Returns True only when the row is new."""
+                     discord_posted: int = 0, summary: str | None = None) -> bool:
+    """Insert an item if unseen. Returns True only when the row is new.
+    Known rows missing a summary get one backfilled while the feed still
+    carries the entry."""
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO news_items "
-            "(source, guid, title, url, kind, thumbnail, published_at, discord_posted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (source, guid, title, url, kind, thumbnail, published_at, discord_posted),
+            "(source, guid, title, url, kind, thumbnail, published_at, discord_posted, summary) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (source, guid, title, url, kind, thumbnail, published_at, discord_posted, summary),
         )
+        if cur.rowcount == 0 and summary:
+            conn.execute(
+                "UPDATE news_items SET summary = ? "
+                "WHERE source = ? AND guid = ? AND (summary IS NULL OR summary = '')",
+                (summary, source, guid),
+            )
         conn.commit()
     return cur.rowcount == 1
+
+
+def mark_news_suppressed(source: str, guid: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE news_items SET suppressed = 1 WHERE source = ? AND guid = ?",
+            (source, guid),
+        )
+        conn.commit()
+
+
+def get_recent_titles(days: int = 2) -> list[dict]:
+    """Titles seen in the last N days (suppressed ones included) — the
+    corpus the cross-source duplicate check compares against."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT source, title FROM news_items WHERE first_seen_at >= ?",
+            (cutoff,),
+        ).fetchall()
+    return [{"source": r[0], "title": r[1]} for r in rows]
 
 
 def mark_news_posted(source: str, guid: str):
@@ -547,12 +582,13 @@ def mark_news_posted(source: str, guid: str):
 
 
 def get_recent_news(limit: int = 30, include_cougconnect: bool = False) -> list[dict]:
-    query = ("SELECT source, title, url, kind, thumbnail, published_at FROM news_items "
-             + ("" if include_cougconnect else "WHERE kind != 'cougconnect' ")
+    query = ("SELECT source, title, url, kind, thumbnail, published_at, summary FROM news_items "
+             "WHERE suppressed = 0 "
+             + ("" if include_cougconnect else "AND kind != 'cougconnect' ")
              + "ORDER BY published_at DESC LIMIT ?")
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(query, (limit,)).fetchall()
     return [
-        dict(zip(["source", "title", "url", "kind", "thumbnail", "published_at"], row))
+        dict(zip(["source", "title", "url", "kind", "thumbnail", "published_at", "summary"], row))
         for row in rows
     ]

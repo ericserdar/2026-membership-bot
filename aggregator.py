@@ -7,10 +7,13 @@ source's very first poll seeds every entry silently so a fresh deploy never
 floods the channel.
 """
 import asyncio
+import difflib
 import gzip
+import html as html_mod
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -84,6 +87,22 @@ def _entry_thumbnail(entry) -> str | None:
     return None
 
 
+def _entry_summary(entry) -> str | None:
+    raw = entry.get("summary") or entry.get("description") or ""
+    if not raw:
+        for media in entry.get("media_content") or []:
+            raw = media.get("description") or ""
+            if raw:
+                break
+    text = html_mod.unescape(re.sub(r"<[^>]+>", " ", raw))
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) < 15:
+        return None
+    if len(text) > 220:
+        text = text[:220].rsplit(" ", 1)[0].rstrip(".,;:") + "…"
+    return text
+
+
 def entry_to_item(entry, source_cfg: dict) -> dict | None:
     guid = entry.get("id") or entry.get("link")
     link = entry.get("link")
@@ -98,7 +117,35 @@ def entry_to_item(entry, source_cfg: dict) -> dict | None:
         "kind": source_cfg["kind"],
         "thumbnail": _entry_thumbnail(entry),
         "published_at": published.isoformat(),
+        "summary": _entry_summary(entry),
     }
+
+
+def _normalize_title(title: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", title.lower())).strip()
+
+
+def is_duplicate_title(title: str, corpus: list[str]) -> bool:
+    """True when a title is effectively the same story as one already seen.
+
+    Conservative on purpose: the target is cross-posted mirrors (a podcast
+    episode and its YouTube upload), not two outlets covering one event.
+    Same-day pressers share long boilerplate ("… | Media Availability |
+    Fall Camp | August 21") and sit around ratio 0.85, so the threshold
+    stays above that.
+    """
+    norm = _normalize_title(title)
+    if len(norm) < 20:
+        return False
+    for seen in corpus:
+        if len(seen) < 20:
+            continue
+        shorter, longer = sorted((norm, seen), key=len)
+        if len(shorter) >= 30 and shorter in longer:
+            return True
+        if difflib.SequenceMatcher(None, norm, seen).ratio() >= 0.92:
+            return True
+    return False
 
 
 def build_embed(item: dict, source_cfg: dict) -> discord.Embed:
@@ -134,6 +181,36 @@ def thread_name(item: dict, source_cfg: dict) -> str:
 # SUPPRESS_NOTIFICATIONS — posts arrive without pinging anyone (like @silent).
 SILENT_FLAG = 1 << 12
 
+KIND_TAG_NAMES = {"video": "Video", "podcast": "Podcast",
+                  "article": "Article", "cougconnect": "CougConnect"}
+_tag_ids: dict[str, int] = {}   # kind -> forum tag id, resolved once per process
+_tag_create_failed = False
+
+
+async def _kind_tag_id(channel, kind: str) -> int | None:
+    """Resolve (creating if needed) the forum tag for a kind.
+    Creating needs Manage Channels; failure disables tagging quietly."""
+    global _tag_create_failed
+    name = KIND_TAG_NAMES.get(kind)
+    if name is None:
+        return None
+    if kind in _tag_ids:
+        return _tag_ids[kind]
+    for tag in channel.available_tags:
+        if tag.name == name:
+            _tag_ids[kind] = tag.id
+            return tag.id
+    if _tag_create_failed:
+        return None
+    try:
+        tag = await channel.create_tag(name=name)
+        _tag_ids[kind] = tag.id
+        return tag.id
+    except Exception as e:
+        _tag_create_failed = True
+        log.warning(f"Forum tag creation failed (needs Manage Channels?): {e}")
+        return None
+
 
 async def send_item(session: aiohttp.ClientSession, channel, item: dict, source_cfg: dict):
     """Post one item silently: a forum post in a forum channel, else a message.
@@ -148,6 +225,9 @@ async def send_item(session: aiohttp.ClientSession, channel, item: dict, source_
             "auto_archive_duration": 10080,
             "message": {"embeds": [embed.to_dict()], "flags": SILENT_FLAG},
         }
+        tag_id = await _kind_tag_id(channel, source_cfg["kind"])
+        if tag_id is not None:
+            payload["applied_tags"] = [str(tag_id)]
         headers = {"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN', '')}"}
         for _ in range(3):
             async with session.post(
@@ -181,7 +261,8 @@ async def _handle_feed_failure(source_cfg: dict, error: Exception, post_admin_lo
     )
 
 
-async def _process_source(session, channel, source_cfg: dict, post_admin_log) -> int:
+async def _process_source(session, channel, source_cfg: dict, post_admin_log,
+                          title_corpus: list[str]) -> int:
     """Poll one source. Returns the number of items silently backfilled."""
     src_id = source_cfg["id"]
     parsed = await fetch_feed(session, source_cfg["url"])
@@ -190,15 +271,24 @@ async def _process_source(session, channel, source_cfg: dict, post_admin_log) ->
     if not db.news_source_seeded(src_id):
         for item in items:
             db.insert_news_item(src_id, item["guid"], item["title"], item["url"],
-                                item["kind"], item["thumbnail"], item["published_at"])
+                                item["kind"], item["thumbnail"], item["published_at"],
+                                summary=item["summary"])
         return len(items)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
     to_post = []
     for item in items:
         is_new = db.insert_news_item(src_id, item["guid"], item["title"], item["url"],
-                                     item["kind"], item["thumbnail"], item["published_at"])
-        if (is_new and len(to_post) < MAX_PER_SOURCE
+                                     item["kind"], item["thumbnail"], item["published_at"],
+                                     summary=item["summary"])
+        if not is_new:
+            continue
+        if is_duplicate_title(item["title"], title_corpus):
+            db.mark_news_suppressed(src_id, item["guid"])
+            log.info(f"Suppressed cross-source duplicate ({src_id}): {item['title'][:80]}")
+            continue
+        title_corpus.append(_normalize_title(item["title"]))
+        if (len(to_post) < MAX_PER_SOURCE
                 and datetime.fromisoformat(item["published_at"]) >= cutoff):
             to_post.append(item)
 
@@ -228,10 +318,12 @@ async def poll_feeds(bot, channel_id: int, post_admin_log):
         )
 
     backfilled = 0
+    title_corpus = [_normalize_title(r["title"]) for r in db.get_recent_titles(days=2)]
     async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
         for source_cfg in load_feeds():
             try:
-                backfilled += await _process_source(session, channel, source_cfg, post_admin_log)
+                backfilled += await _process_source(session, channel, source_cfg,
+                                                    post_admin_log, title_corpus)
             except Exception as e:
                 await _handle_feed_failure(source_cfg, e, post_admin_log)
     if backfilled:
