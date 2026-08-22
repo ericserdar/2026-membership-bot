@@ -317,6 +317,11 @@ async def poll_feeds(bot, channel_id: int, post_admin_log):
             "is off — set DISCORD_NEWS_CHANNEL_ID to the #byu-news channel ID."
         )
 
+    # Retry tag creation each cycle: one failed attempt per 20 min is
+    # harmless, and a permission grant gets picked up without a restart.
+    global _tag_create_failed
+    _tag_create_failed = False
+
     backfilled = 0
     title_corpus = [_normalize_title(r["title"]) for r in db.get_recent_titles(days=2)]
     async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
