@@ -7,6 +7,7 @@
   {"id": "locked-on-big12",   "name": "Locked On Big 12",       "url": "https://feeds.simplecast.com/tCmD8cjX", "kind": "podcast", "enabled": true},
   {"id": "ben-criddle",       "name": "Ben Criddle Show",       "url": "https://www.spreaker.com/show/1369939/episodes/feed", "kind": "podcast", "enabled": true},
   {"id": "byu-sports-nation", "name": "BYU Sports Nation",      "url": "https://www.byuradio.org/rss/showpodcastfeed/21cd2aa7-ebee-444d-8cdc-2111295d90f7", "kind": "podcast", "enabled": true},
+  {"id": "cougar-tracks",     "name": "Cougar Tracks (KSL)",    "url": "https://feed.cdnstream1.com/zjb/feed/download/88/5d/96/885d9683-1b29-456c-bc2b-9ff8692065c3.xml", "kind": "podcast", "enabled": true},
   {"id": "yt-byucougars",     "name": "BYU Cougars on YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCreL2UlUK2cV2OXZ4SGstBQ", "kind": "video", "enabled": true},
   {"id": "yt-byutv-sn",       "name": "BYUtv Sports Nation",    "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCPGJ6U6tzIKHubr5zFWFZLw", "kind": "video", "enabled": true},
   {"id": "yt-locked-on-b12",  "name": "Locked On Big 12 (YouTube)", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCIaiqufEekxiTnnLc129t2g", "kind": "video", "enabled": true},
