@@ -18,6 +18,7 @@ import html
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import datetime
@@ -552,9 +553,16 @@ class CougConnectBot(commands.Bot):
         if not sponsors or not channel:
             return
         sponsor = sponsors[dt.now(timezone.utc).isocalendar().week % len(sponsors)]
+        url = (sponsor.get("url") or "").strip() or None
+        description = sponsor.get("blurb", "")
+        if url:
+            # Visible link line so members know the spotlight is clickable
+            display = re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
+            description = f"{description}\n\n🔗 [{display}]({url})"
         embed = discord.Embed(
             title=f"🤝 Sponsor Spotlight: {sponsor['name']}",
-            description=sponsor.get("blurb", ""),
+            description=description,
+            url=url,  # makes the embed title a clickable link to the sponsor's site
             color=discord.Color.blue(),
         )
         embed.set_footer(text="CougConnect sponsors keep this community running — show them some love!")
