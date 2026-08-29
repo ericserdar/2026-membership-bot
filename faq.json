@@ -50,5 +50,9 @@
   {
     "q": "Do members get anything from the shop?",
     "a": "Silver and Gold members earn store credit every year they stay ($25 Silver / $55 Gold), and swag boxes ship after each eligibility window. Player tees (Kyler Kasper, Royal Nights and more) and CougConnect gear are at https://cougconnect.com/shop/"
+  },
+  {
+    "q": "Discord is getting noisy — how do I quiet it down?",
+    "a": "Six habits that keep it pleasant:\n\n• **Mute a channel** — right-click it (phone: press and hold) → Mute Channel → pick how long. You can still read it; it just stops badging you.\n• **Only get pinged when it matters** — click the server name at the top → Notification Settings → Only @mentions. The pings you pick in Channels & Roles still come through.\n• **Hide what you never open** — right-click the server → Hide Muted Channels. Click a category name to collapse it.\n• **Game threads** — once you post in one it notifies you until the game ends. Open the thread → ⋯ → Leave Thread to stop.\n• **Someone is a problem** — right-click their name → Block; their messages collapse for you. Then tell us in #support-ticket — we would rather know.\n• **Too many red badges?** — Shift+Esc marks the whole server read."
   }
 ]

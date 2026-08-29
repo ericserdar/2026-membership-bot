@@ -176,6 +176,22 @@ def ob_channel_link(key: str) -> str:
     return f"https://discord.com/channels/{GUILD_ID}/{cid}" if cid else ob_url("invite")
 
 
+def ob_chan_md(key: str) -> str:
+    """Channel as a masked link — for DMs and embeds.
+
+    In a DM, a <#id> mention renders as a bulky "Server › #channel" chip, so a
+    list of them turns into a wall of badges. A masked link reads like a plain
+    channel name and still opens the channel. Falls back to the bare key when
+    the channel isn't cached yet (cold start).
+    """
+    cid = ob_channel_id(key)
+    if not cid:
+        return f"#{key}"
+    ch = bot.get_channel(cid)
+    name = ch.name if ch else key.replace("_", "-")
+    return f"[#{name}]({ob_channel_link(key)})"
+
+
 def ping_roles_link() -> str:
     """Discord's Channels & Roles tab, where members pick their ping roles."""
     return f"https://discord.com/channels/{GUILD_ID}/customize-community"
@@ -865,15 +881,31 @@ SIZE_LABELS = {"x-small": "XS", "small": "Small", "mediuk": "Medium", "medium": 
                "large": "Large", "x-large": "XL", "xxl": "XXL", "3xl": "3XL"}
 
 
-async def _dm_member(discord_id: int, content: str, view: discord.ui.View | None = None, what: str = "DM") -> bool:
-    """Send a DM, honouring ONBOARDING_DRY_RUN. Returns True if it went out (or would have)."""
-    if ONBOARDING_DRY_RUN:
+async def _dm_member(
+    discord_id: int,
+    content: str,
+    view: discord.ui.View | None = None,
+    what: str = "DM",
+    embeds: list[discord.Embed] | None = None,
+    ignore_dry_run: bool = False,
+) -> bool:
+    """Send a DM, honouring ONBOARDING_DRY_RUN. Returns True if it went out (or would have).
+
+    Link previews are suppressed on plain-text DMs so a YouTube or shop URL
+    doesn't unfurl into a second screen of cards; DMs that carry their own
+    embeds can't use the flag (it would hide those too), so their content
+    never contains a bare URL.
+    """
+    if ONBOARDING_DRY_RUN and not ignore_dry_run:
         log.info(f"[dry-run] would send {what} to discord_id={discord_id}")
         await post_admin_log(f"🧪 [dry-run] would send **{what}** to <@{discord_id}>")
         return True
     try:
         user = await bot.fetch_user(discord_id)
-        await user.send(content, view=view)
+        if embeds:
+            await user.send(content, embeds=embeds, view=view)
+        else:
+            await user.send(content, view=view, suppress_embeds=True)
         return True
     except Exception as e:
         log.info(f"{what} to discord_id={discord_id} not delivered (DMs likely closed): {e}")
@@ -884,10 +916,10 @@ def _join_dm_text() -> str:
     return (
         "👋 **Welcome to the CougConnect Discord!**\n\n"
         "Right now you can only see a couple of channels — that changes in 30 seconds:\n"
-        f"1️⃣ Tap **Verify Membership** below (or in {ob_channel('verification')}) and enter the **email you subscribed with**.\n"
-        f"2️⃣ Read the rules in {ob_channel('rules')}.\n"
-        f"3️⃣ Pick your pings in **Channels & Roles** so you know when we go live: {ping_roles_link()}\n\n"
-        f"Not a member yet? The Discord is part of a CougConnect membership → {ob_url('subscribe')}\n\n"
+        f"1️⃣ Tap **Verify Membership** below (or in {ob_chan_md('verification')}) and enter the **email you subscribed with**.\n"
+        f"2️⃣ Read the rules in {ob_chan_md('rules')}.\n"
+        f"3️⃣ Pick your pings in [Channels & Roles]({ping_roles_link()}) so you know when we go live.\n\n"
+        f"Not a member yet? The Discord is part of a [CougConnect membership]({ob_url('subscribe')}).\n\n"
         "Go Cougs 🤙"
     )
 
@@ -903,9 +935,9 @@ def _join_dm_view() -> discord.ui.View:
 def _unverified_nudge_text() -> str:
     return (
         "👋 Still on the outside? Verifying takes 30 seconds — tap **Verify Membership** below and enter the "
-        f"**email you subscribed with**. If it says 'not found', open a ticket in {ob_channel('support')} and "
+        f"**email you subscribed with**. If it says 'not found', open a ticket in {ob_chan_md('support')} and "
         "we'll sort it same day.\n\n"
-        f"Not a member yet? The Discord is part of a CougConnect membership → {ob_url('subscribe')}\n\n"
+        f"Not a member yet? The Discord is part of a [CougConnect membership]({ob_url('subscribe')}).\n\n"
         "Go Cougs 🤙"
     )
 
@@ -918,27 +950,90 @@ def _welcome_dm_text(tier: str, apartment_slug: str | None = None) -> str:
                   "box, and $25 in store credit every year you stay.",
         "insider": "As an **Insider** you get the player reports and the community channels — everything the crew talks about all week.",
     }
-    tier_keys = ONBOARDING.get("tier_channels", {}).get(tier, [])
-    start_keys = ["general", "news"] + [k for k in tier_keys if k not in ("general", "news")]
-    start_here = " · ".join(ob_channel(k) for k in start_keys if ob_channel_id(k))
     apartment_line = ""
     cfg = APARTMENTS.get(apartment_slug) if apartment_slug else None
     if cfg:
-        apartment_line = (f"🏠 We also gave you the **{cfg.get('label', apartment_slug)}** role — "
-                          "check out your complex's channel to connect with neighbors.\n\n")
-    return (
-        f"🎉 **You're verified — your {tier_label(tier)} role is on.**\n\n"
-        f"{tier_perks.get(tier, '')}\n\n"
-        f"{apartment_line}"
-        f"**Start here:** {start_here}\n"
-        f"🎙️ VCs and AMAs are announced in {ob_channel('announcements')} — grab **🎙️ VC & AMA Pings** in "
-        f"Channels & Roles so you don't miss them: {ping_roles_link()}\n"
-        f"🏈 Game days: a game thread opens in {ob_channel('general')}. Pick'em runs in {ob_channel('pickem')}.\n"
-        f"▶️ New podcast episodes drop in {ob_channel('youtube')} almost every day — subscribe on YouTube so "
-        f"they hit your feed too: {ob_url('youtube')}\n"
-        f"🛍️ Gear: player tees like the Kyler Kasper and Royal Nights shirts → {ob_url('shop')}\n\n"
-        f"Questions? Open a ticket in {ob_channel('support')} or just reply here. Go Cougs! 🏈"
+        apartment_line = (f"\n\n🏠 We also gave you the **{cfg.get('label', apartment_slug)}** role — "
+                          "your complex has its own channel for meeting neighbors.")
+    return f"{tier_perks.get(tier, '')}{apartment_line}"
+
+
+def _discord_tips_embed() -> discord.Embed:
+    """Six Discord habits that keep a busy server pleasant. Reused by /faq."""
+    tips = discord.Embed(
+        title="🔕 Discord tips — it can get noisy",
+        colour=discord.Colour(0x4E5058),
+        description=(
+            "**Mute a channel** — right-click it (phone: press and hold) → **Mute Channel** → pick how long. "
+            "You can still read it; it just stops badging you.\n\n"
+            "**Only get pinged when it matters** — click the server name at the top → **Notification Settings** → "
+            f"**Only @mentions**. The pings you pick in [Channels & Roles]({ping_roles_link()}) still come through.\n\n"
+            "**Hide what you never open** — right-click the server → **Hide Muted Channels**. "
+            "Click a category name to collapse it.\n\n"
+            "**Game threads** — once you post in one, it notifies you until the game ends. "
+            "Open the thread → **⋯** → **Leave Thread** to stop.\n\n"
+            "**Someone's a problem** — right-click their name → **Block**; their messages collapse for you. "
+            f"Then tell us in {ob_chan_md('support')} — we'd rather know.\n\n"
+            "**Too many red badges?** — **Shift+Esc** marks the whole server read."
+        ),
     )
+    return tips
+
+
+def _welcome_dm_parts(tier: str, apartment_slug: str | None = None) -> tuple[str, list[discord.Embed], discord.ui.View]:
+    """Welcome DM v3: one-line headline, a "Start here" card, the tips card, four link buttons.
+
+    Everything lives in embeds + buttons so nothing unfurls and channel names
+    read as names instead of "Server › #channel" chips.
+    """
+    tier_keys = ONBOARDING.get("tier_channels", {}).get(tier, [])
+    blurbs = {
+        "general": "the daily conversation — game threads open here on game day",
+        "news": "every BYU story, auto-posted as it breaks",
+        "player_reports": "what you subscribed for",
+        "player_ama": "ask the players directly during AMAs",
+        "insider_info": "notes and nuggets between reports",
+        "vc_recaps": "catch up on any voice chat you missed",
+        "gold_lounge": "the Gold lounge",
+        "silver": "Silver & Gold members' channel",
+    }
+    order = ["general", "news", "player_reports", "player_ama", "gold_lounge", "silver", "insider_info", "vc_recaps"]
+    keys = ["general", "news"] + [k for k in order if k in tier_keys and k not in ("general", "news")]
+    channel_lines = "\n".join(f"{ob_chan_md(k)} — {blurbs.get(k, '')}".rstrip(" —") for k in keys if ob_channel_id(k))
+
+    start = discord.Embed(
+        title="Start here",
+        colour=discord.Colour(0x1A3EF0),
+        description=_welcome_dm_text(tier, apartment_slug),
+    )
+    start.add_field(name="Your channels", value=channel_lines or "Open the server and look around.", inline=False)
+    start.add_field(
+        name="🎙️ Voice chats & AMAs",
+        value=(f"Announced in {ob_chan_md('announcements')}. Turn on **VC & AMA Pings** in "
+               f"[Channels & Roles]({ping_roles_link()}) so you get a heads-up before we go live."),
+        inline=False,
+    )
+    start.add_field(
+        name="🏈 Game days & Pick'em",
+        value=f"The game thread opens in {ob_chan_md('general')} · Pick'em runs in {ob_chan_md('pickem')}.",
+        inline=False,
+    )
+    start.add_field(
+        name="▶️ Podcast · 🛍️ Gear",
+        value=(f"New episodes land in {ob_chan_md('youtube')} almost every day — subscribe on YouTube so they hit "
+               "your feed too. Player tees (Kyler Kasper, Royal Nights) are in the shop."),
+        inline=False,
+    )
+    start.set_footer(text="Questions? Open a ticket in #support-ticket or just reply here. Go Cougs! 🏈")
+
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="Open your channels", url=ob_channel_link("general"), style=discord.ButtonStyle.link, emoji="💬"))
+    view.add_item(discord.ui.Button(label="Pick your pings", url=ping_roles_link(), style=discord.ButtonStyle.link, emoji="🔔"))
+    view.add_item(discord.ui.Button(label="Subscribe on YouTube", url=ob_url("youtube"), style=discord.ButtonStyle.link, emoji="▶️"))
+    view.add_item(discord.ui.Button(label="Shop player tees", url=ob_url("shop"), style=discord.ButtonStyle.link, emoji="🛍️"))
+
+    content = f"🎉 **You're verified — your {tier_label(tier)} role is on.**"
+    return content, [start, _discord_tips_embed()], view
 
 
 def _checkin_dm_text(days: int, tier: str) -> str:
@@ -946,18 +1041,20 @@ def _checkin_dm_text(days: int, tier: str) -> str:
     if days == 7:
         return (
             "👋 **One week in — here's how to get the most out of CougConnect:**\n"
-            f"🔔 Pick your pings in Channels & Roles (VC & AMA · Pick'em · Game Thread): {ping_roles_link()}\n"
-            f"🏈 Game days: the game thread opens in {ob_channel('general')} — Pick'em is in {ob_channel('pickem')}.\n"
-            f"📰 {ob_channel('news')} pulls every BYU story into one feed; voice-chat recaps land on the site.\n"
-            f"▶️ The daily podcast is on YouTube — subscribe so episodes hit your feed: {ob_url('youtube')}\n"
-            f"🛍️ Gear: player tees (Kyler Kasper, Royal Nights, more) → {ob_url('shop')}"
+            f"🔔 Pick your pings in [Channels & Roles]({ping_roles_link()}) — VC & AMA · Pick'em · Game Thread.\n"
+            f"🏈 Game days: the game thread opens in {ob_chan_md('general')} — Pick'em is in {ob_chan_md('pickem')}.\n"
+            f"📰 {ob_chan_md('news')} pulls every BYU story into one feed; voice-chat recaps land on the site.\n"
+            f"▶️ The daily podcast is on YouTube — [subscribe]({ob_url('youtube')}) so episodes hit your feed.\n"
+            f"🛍️ Gear: player tees (Kyler Kasper, Royal Nights, more) in [the shop]({ob_url('shop')})."
             + (" Silver and Gold members earn store credit every year they stay." if credit else "")
-            + f"\n\nAnything confusing? Reply here or open a ticket in {ob_channel('support')}. Go Cougs!"
+            + "\n🔕 Getting noisy? Right-click any channel → **Mute Channel**. Server name → **Notification Settings** → "
+            "**Only @mentions** keeps just the pings you picked."
+            + f"\n\nAnything confusing? Reply here or open a ticket in {ob_chan_md('support')}. Go Cougs!"
         )
     return (
         "🙏 **A month with us — thank you.** Your membership is what pays the players who show up here.\n\n"
         "One question: what's the one thing you'd like more of? Reply to this message — a human reads every one.\n\n"
-        f"Heading to a game? Wear the crew's colors → {ob_url('shop')}"
+        f"Heading to a game? [Wear the crew's colors]({ob_url('shop')})."
         + (" Your yearly store credit unlocks at 12 months." if credit else "")
         + "\n\nGo Cougs 🤙"
     )
@@ -1358,7 +1455,8 @@ async def send_welcome_dm(discord_id: int, tier: str, apartment_slug: str | None
     `discord-verified` in Mailchimp (flag-gated) so the email journey stops
     nudging them to verify.
     """
-    sent = await _dm_member(discord_id, _welcome_dm_text(tier, apartment_slug), what="welcome DM")
+    content, embeds, view = _welcome_dm_parts(tier, apartment_slug)
+    sent = await _dm_member(discord_id, content, view=view, embeds=embeds, what="welcome DM")
     db.set_join_flag(str(discord_id), "welcome_dm_sent" if sent else "welcome_dm_failed")
     if email:
         try:
@@ -2024,6 +2122,48 @@ async def sync_links_to_wp(interaction: discord.Interaction):
     await interaction.followup.send(
         f"✅ Sent **{len(links)}** link(s) to WordPress — stored: **{totals.get('ok', 0)}**, "
         f"no matching WP user: {totals.get('no-user', 0)}, invalid: {totals.get('invalid', 0)}, failed: {totals.get('failed', 0)}.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="preview-onboarding-dm", description="DM yourself one of the onboarding messages to check the copy")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(kind="Which message", tier="Tier to render the welcome / day-7 copy for")
+@app_commands.choices(
+    kind=[
+        app_commands.Choice(name="Welcome DM (after verifying)", value="welcome"),
+        app_commands.Choice(name="Join DM (on joining the server)", value="join"),
+        app_commands.Choice(name="Unverified nudge (day 1 / 3)", value="nudge"),
+        app_commands.Choice(name="Day-7 check-in", value="day7"),
+        app_commands.Choice(name="Day-30 check-in", value="day30"),
+        app_commands.Choice(name="Discord tips only", value="tips"),
+    ],
+    tier=[
+        app_commands.Choice(name="Gold", value="gold"),
+        app_commands.Choice(name="Silver", value="silver"),
+        app_commands.Choice(name="Insider", value="insider"),
+    ],
+)
+async def preview_onboarding_dm(interaction: discord.Interaction, kind: app_commands.Choice[str], tier: app_commands.Choice[str] | None = None):
+    """Sends the real message to the admin who ran it — bypasses dry-run, touches no member state."""
+    await interaction.response.defer(ephemeral=True)
+    t = tier.value if tier else "insider"
+    k = kind.value
+    if k == "welcome":
+        content, embeds, view = _welcome_dm_parts(t)
+    elif k == "join":
+        content, embeds, view = _join_dm_text(), None, _join_dm_view()
+    elif k == "nudge":
+        content, embeds, view = _unverified_nudge_text(), None, _join_dm_view()
+    elif k == "day7":
+        content, embeds, view = _checkin_dm_text(7, t), None, None
+    elif k == "day30":
+        content, embeds, view = _checkin_dm_text(30, t), None, None
+    else:
+        content, embeds, view = "🔕 **Discord tips**", [_discord_tips_embed()], None
+    ok = await _dm_member(interaction.user.id, content, view=view, embeds=embeds, what=f"preview {k}", ignore_dry_run=True)
+    await interaction.followup.send(
+        f"{'📬 Sent — check your DMs.' if ok else '❌ Could not DM you (DMs closed?).'} `{k}` / `{t}`",
         ephemeral=True,
     )
 
