@@ -2,7 +2,7 @@
   "_comment": "New-member journey config. Edit copy targets here without touching code. Channel IDs = CougConnect guild 1050090756649537616.",
   "urls": {
     "site": "https://cougconnect.com",
-    "premium": "https://cougconnect.com/premium-content/",
+    "premium": "https://cougconnect.com/category/premium-content/",
     "account": "https://cougconnect.com/account/",
     "subscribe": "https://cougconnect.com/become-a-subscriber/",
     "shop": "https://cougconnect.com/shop/?utm_source=discord&utm_medium=onboarding&utm_campaign=new_member",
