@@ -926,7 +926,7 @@ def _welcome_dm_text(tier: str, apartment_slug: str | None = None) -> str:
         f"🏈 Game days: a game thread opens in {ob_channel('general')}. Pick'em runs in {ob_channel('pickem')}.\n"
         f"▶️ New podcast episodes drop in {ob_channel('youtube')} almost every day — subscribe on YouTube so "
         f"they hit your feed too: {ob_url('youtube')}\n"
-        f"🛍️ Gear: player tees and the custom BYU jersey at the member price → {ob_url('shop')}\n\n"
+        f"🛍️ Gear: player tees like the Kyler Kasper and Royal Nights shirts → {ob_url('shop')}\n\n"
         f"Questions? Open a ticket in {ob_channel('support')} or just reply here. Go Cougs! 🏈"
     )
 
@@ -940,14 +940,14 @@ def _checkin_dm_text(days: int, tier: str) -> str:
             f"🏈 Game days: the game thread opens in {ob_channel('general')} — Pick'em is in {ob_channel('pickem')}.\n"
             f"📰 {ob_channel('news')} pulls every BYU story into one feed; voice-chat recaps land on the site.\n"
             f"▶️ The daily podcast is on YouTube — subscribe so episodes hit your feed: {ob_url('youtube')}\n"
-            f"🛍️ Gear: player tees and the custom jersey at the member price → {ob_url('shop')}"
+            f"🛍️ Gear: player tees (Kyler Kasper, Royal Nights, more) → {ob_url('shop')}"
             + (" Silver and Gold members earn store credit every year they stay." if credit else "")
             + f"\n\nAnything confusing? Reply here or open a ticket in {ob_channel('support')}. Go Cougs!"
         )
     return (
         "🙏 **A month with us — thank you.** Your membership is what pays the players who show up here.\n\n"
         "One question: what's the one thing you'd like more of? Reply to this message — a human reads every one.\n\n"
-        f"Heading to a game? Wear the crew's colors → {ob_url('shop')} (member price on the jersey)."
+        f"Heading to a game? Wear the crew's colors → {ob_url('shop')}"
         + (" Your yearly store credit unlocks at 12 months." if credit else "")
         + "\n\nGo Cougs 🤙"
     )
