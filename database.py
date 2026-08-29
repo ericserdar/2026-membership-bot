@@ -161,6 +161,17 @@ def init_db():
                 synced_at    TEXT
             )
         """)
+        # OAuth "Connect Discord" from the account page: one row per started
+        # login, consumed exactly once by the callback.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS connect_states (
+                state       TEXT PRIMARY KEY,
+                email       TEXT,
+                wp_user_id  INTEGER,
+                created_at  TEXT,
+                used        INTEGER DEFAULT 0
+            )
+        """)
         # unlinked_members grew columns so the funnel can tell "never verified"
         # from "verified later" without deleting the signup history.
         for col_decl in ("email TEXT", "registered_at TEXT", "verified_at TEXT"):
@@ -230,7 +241,38 @@ def cleanup_expired_tokens():
             "DELETE FROM verify_tokens WHERE expires_at < ? OR used = 1",
             (datetime.utcnow().isoformat(),),
         )
+        conn.execute(
+            "DELETE FROM connect_states WHERE created_at < ? OR used = 1",
+            ((datetime.utcnow() - timedelta(minutes=30)).isoformat(),),
+        )
         conn.commit()
+
+
+# ── OAuth connect states (account-page "Connect Discord") ────────────────────
+
+def create_connect_state(state: str, email: str, wp_user_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO connect_states (state, email, wp_user_id, created_at) VALUES (?, ?, ?, ?)",
+            (state, email, wp_user_id, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+
+def consume_connect_state(state: str, max_age_minutes: int = 15) -> dict | None:
+    """Return {email, wp_user_id} once for a fresh, unused state; None otherwise."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT email, wp_user_id, created_at, used FROM connect_states WHERE state = ?", (state,)
+        ).fetchone()
+        if not row:
+            return None
+        email, wp_user_id, created_at, used = row
+        if used or datetime.utcnow() - datetime.fromisoformat(created_at) > timedelta(minutes=max_age_minutes):
+            return None
+        conn.execute("UPDATE connect_states SET used = 1 WHERE state = ?", (state,))
+        conn.commit()
+    return {"email": email, "wp_user_id": wp_user_id}
 
 
 # ── Member links ──────────────────────────────────────────────────────────────

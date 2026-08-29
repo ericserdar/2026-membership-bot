@@ -19,10 +19,12 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import datetime
 from datetime import datetime as dt, timezone
+from urllib.parse import urlencode
 
 import aiohttp
 import aiohttp.web as web
@@ -35,6 +37,7 @@ import aggregator
 import database as db
 import mailchimp
 import memberpress as mp
+import wp_link
 
 load_dotenv()
 
@@ -53,6 +56,13 @@ PORT = int(os.getenv("PORT", "8080"))
 BOT_PUBLIC_URL = os.getenv("BOT_PUBLIC_URL", "http://localhost:8080")
 MP_WEBHOOK_SECRET = os.getenv("MEMBERPRESS_WEBHOOK_SECRET", "")
 BOT_VERIFY_SECRET = os.getenv("BOT_VERIFY_SECRET", "")
+# Account-page "Connect Discord": the site mints a token signed with
+# BOT_VERIFY_SECRET (Shirt Batches → Settings → Connect secret), /connect
+# validates it and runs Discord OAuth (identify + guilds.join). The client
+# secret comes from the Developer Portal for the bot application.
+DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "1489119085961809981")
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
+CONNECT_REDIRECT_PATH = "/connect/callback"
 # Random path segment authenticating webhooks (MemberPress can't sign reliably).
 # When set, webhooks POST to /webhook/<token>; bare /webhook stays active for the
 # transition unless DISABLE_LEGACY_WEBHOOK=1.
@@ -1537,7 +1547,9 @@ async def on_member_join(member: discord.Member):
         except Exception as e:
             log.error(f"Role restore on rejoin failed for discord_id={member.id}: {e}")
         if ONBOARDING_JOIN_DM:
-            await _dm_member(member.id, f"👋 Welcome back! Your **{tier_label(existing['tier'])}** role is restored. Go Cougs 🤙", what="rejoin DM")
+            # Members who connected from the website arrive here already linked
+            # but without the guide — send the full welcome, not a "welcome back".
+            await send_welcome_dm(member.id, existing["tier"], None, existing.get("mp_email"))
         return
     if not ONBOARDING_JOIN_DM:
         return
@@ -1650,6 +1662,7 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
     db.upsert_member(str(user.id), mp_id, email, tier)
     db.mark_unlinked_verified(mp_id)
     success = await assign_role(user.id, tier)
+    asyncio.create_task(wp_link.push_link(email, user.id, user.display_name))
 
     if success:
         await interaction.followup.send(
@@ -1674,6 +1687,7 @@ async def unlink_member(interaction: discord.Interaction, user: discord.Member):
         return
     db.remove_member(str(user.id))
     await assign_role(user.id, "unsubscribed")
+    asyncio.create_task(wp_link.push_unlink(existing["mp_email"]))
     await interaction.followup.send(f"✅ Unlinked **{user.display_name}** and set role to Unsubscribed.", ephemeral=True)
 
 
@@ -1988,6 +2002,30 @@ async def tier_sync_preview(interaction: discord.Interaction, only_new: bool = T
         )
     else:
         await interaction.followup.send(summary, ephemeral=True)
+
+
+@bot.tree.command(name="sync-links-to-wp", description="Push every Discord link the bot knows to WordPress (account-page status)")
+@app_commands.default_permissions(administrator=True)
+async def sync_links_to_wp(interaction: discord.Interaction):
+    """One-time backfill so the account page can show 'Verified' for members who
+    linked through the bot before WordPress kept a copy. Safe to re-run."""
+    await interaction.response.defer(ephemeral=True)
+    if not wp_link.configured():
+        await interaction.followup.send("❌ CCSB_TENURE_URL / CCSB_TENURE_KEY are not set — nothing sent.", ephemeral=True)
+        return
+    guild = get_guild()
+    links = []
+    for r in db.get_all_members():
+        if r["tier"] not in ("gold", "silver", "insider") or not r.get("mp_email"):
+            continue
+        m = guild.get_member(int(r["discord_id"])) if guild else None
+        links.append({"email": r["mp_email"], "discord_id": str(r["discord_id"]), "username": m.display_name if m else ""})
+    totals = await wp_link.push_links(links)
+    await interaction.followup.send(
+        f"✅ Sent **{len(links)}** link(s) to WordPress — stored: **{totals.get('ok', 0)}**, "
+        f"no matching WP user: {totals.get('no-user', 0)}, invalid: {totals.get('invalid', 0)}, failed: {totals.get('failed', 0)}.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="pending-links", description="List paying MemberPress accounts not linked to Discord")
@@ -2364,16 +2402,231 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
 
     log.info(f"Verified discord_id={discord_id} email={email} tier={tier} apartment={apartment_slug}")
     asyncio.create_task(send_welcome_dm(int(discord_id), tier, apartment_slug, email))
+    asyncio.create_task(wp_link.push_link(email, discord_id, _display_name(int(discord_id))))
+    return _success_page(tier)
+
+
+# ── Account-page "Connect Discord" (OAuth) ────────────────────────────────────
+
+def _display_name(discord_id: int) -> str:
+    guild = get_guild()
+    member = guild.get_member(discord_id) if guild else None
+    if member:
+        return member.display_name or member.name
+    user = bot.get_user(discord_id)
+    return user.name if user else ""
+
+
+def _success_page(tier: str, in_server: bool = True) -> web.Response:
+    """Shared 'you're verified' page for the verify form and the OAuth connect."""
     tier_display = tier_label(tier)
     home_key = {"gold": "gold_lounge", "silver": "silver", "insider": "insider_info"}.get(tier, "general")
+    if in_server:
+        note = "We also sent you a Discord DM with a channel guide."
+        first = f'<a href="{ob_channel_link(home_key)}" {BTN_PRIMARY}>Open your channels</a>'
+    else:
+        note = "One more step: join the server with the invite below — your role applies the moment you're in."
+        first = f'<a href="{ob_url("invite")}" {BTN_PRIMARY}>Join the Discord</a>'
     return _page("Verified!", f"""
         <h1>✅ You're Verified!</h1>
-        <p>Your <strong>{tier_display}</strong> role is on. We also sent you a Discord DM with a channel guide.</p>
-        <a href="{ob_channel_link(home_key)}" {BTN_PRIMARY}>Open your channels</a>
+        <p>Your <strong>{tier_display}</strong> role is on. {note}</p>
+        {first}
         <a href="{ping_roles_link()}" {BTN_SECONDARY}>Pick your pings (Channels &amp; Roles)</a>
         <a href="{ob_channel_link('rules')}" {BTN_SECONDARY}>Read the rules</a>
         <a href="{ob_url('youtube')}" {BTN_SECONDARY}>▶ Subscribe on YouTube — daily podcast</a>
     """)
+
+
+def _parse_connect_token(token: str) -> dict | None:
+    """Validate a site-minted Connect token: base64url(JSON) '.' hex(HMAC-SHA256 with BOT_VERIFY_SECRET).
+
+    The email inside a valid token is the ONLY identity we trust — never a query
+    parameter — so a URL can't be edited to link someone else's membership.
+    """
+    if not BOT_VERIFY_SECRET or "." not in token:
+        return None
+    encoded, sig = token.rsplit(".", 1)
+    expected = hmac.new(BOT_VERIFY_SECRET.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or int(payload.get("exp") or 0) < int(dt.now(timezone.utc).timestamp()):
+        return None
+    email = str(payload.get("email") or "").strip().lower()
+    if "@" not in email:
+        return None
+    return {"email": email, "uid": int(payload.get("uid") or 0)}
+
+
+def _connect_expired_page() -> web.Response:
+    return _page("Link expired", f"""
+        <h1>⏰ This link has expired</h1>
+        <p>Connect links last 15 minutes. Go back to your account page and click <strong>Connect Discord</strong> again.</p>
+        <a href="{ob_url('account')}" {BTN_PRIMARY}>Back to my account</a>
+    """)
+
+
+def _connect_problem_page(message_html: str) -> web.Response:
+    return _page("Not connected", f"""
+        <h1>⚠️ We couldn't finish that</h1>
+        <p>{message_html}</p>
+        <a href="{ob_channel_link('support')}" {BTN_PRIMARY}>Open a support ticket</a>
+        <a href="{ob_url('account')}" {BTN_SECONDARY}>Back to my account</a>
+    """)
+
+
+async def _guild_join(discord_id: str, access_token: str) -> bool:
+    """Add the member to the server via guilds.join. True if they end up in it.
+
+    Needs "Create Invite" on the bot's role; without it Discord answers 403 and
+    the success page falls back to the invite link.
+    """
+    guild = get_guild()
+    if guild and guild.get_member(int(discord_id)):
+        return True
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            async with session.put(
+                f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{discord_id}",
+                json={"access_token": access_token},
+                headers={"Authorization": f"Bot {TOKEN}"},
+            ) as resp:
+                if resp.status in (201, 204):
+                    return True
+                log.warning(f"Connect: guilds.join returned {resp.status}: {(await resp.text())[:200]}")
+    except Exception as e:
+        log.warning(f"Connect: guilds.join failed: {e}")
+    return False
+
+
+async def handle_connect(request: web.Request) -> web.Response:
+    """Site → bot hand-off. Validates the signed token, parks the email behind a
+    one-time state, and sends the member to Discord's login."""
+    if not DISCORD_CLIENT_SECRET or not BOT_VERIFY_SECRET or not BOT_PUBLIC_URL.startswith("http"):
+        return _page("Connect", f"""
+            <h1>Connect isn't switched on yet</h1>
+            <p>Use the invite and the <strong>Verify Membership</strong> button in #verification instead.</p>
+            <a href="{ob_url('invite')}" {BTN_PRIMARY}>Join the Discord</a>
+        """)
+    payload = _parse_connect_token(request.rel_url.query.get("t", ""))
+    if not payload:
+        return _connect_expired_page()
+    state = secrets.token_urlsafe(24)
+    db.create_connect_state(state, payload["email"], payload["uid"])
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": BOT_PUBLIC_URL + CONNECT_REDIRECT_PATH,
+        "scope": "identify guilds.join",
+        "state": state,
+        "prompt": "consent",
+    }
+    raise web.HTTPFound("https://discord.com/oauth2/authorize?" + urlencode(params))
+
+
+async def handle_connect_callback(request: web.Request) -> web.Response:
+    """Discord → bot: exchange the code, confirm the membership, link, join, role, DM."""
+    q = request.rel_url.query
+    ctx = db.consume_connect_state(q.get("state", ""))
+    if not ctx:
+        return _connect_expired_page()
+    if q.get("error") or not q.get("code"):
+        return _page("Not connected", f"""
+            <h1>No problem</h1>
+            <p>You cancelled the Discord login, so nothing was linked. Whenever you're ready, click
+               <strong>Connect Discord</strong> on your account page again.</p>
+            <a href="{ob_url('account')}" {BTN_PRIMARY}>Back to my account</a>
+        """)
+    email = ctx["email"]
+
+    # 1) Authorization code → access token → who is this?
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            async with session.post(
+                "https://discord.com/api/oauth2/token",
+                data={
+                    "client_id": DISCORD_CLIENT_ID,
+                    "client_secret": DISCORD_CLIENT_SECRET,
+                    "grant_type": "authorization_code",
+                    "code": q["code"],
+                    "redirect_uri": BOT_PUBLIC_URL + CONNECT_REDIRECT_PATH,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            ) as resp:
+                tok = await resp.json(content_type=None)
+                access = tok.get("access_token") if resp.status == 200 and isinstance(tok, dict) else None
+            if not access:
+                log.warning(f"Connect: token exchange failed for {email}: {resp.status} {str(tok)[:200]}")
+                return _connect_problem_page("Discord didn't complete the login. Try <strong>Connect Discord</strong> again from your account page.")
+            async with session.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {access}"}) as resp:
+                me = await resp.json(content_type=None)
+    except Exception as e:
+        log.error(f"Connect: Discord API error for {email}: {e}")
+        return _connect_problem_page("Discord didn't answer. Give it a minute and try again from your account page.")
+
+    discord_id = str((me or {}).get("id") or "")
+    username = (me or {}).get("global_name") or (me or {}).get("username") or ""
+    if not discord_id:
+        return _connect_problem_page("Discord didn't tell us who you are. Try again from your account page.")
+
+    # 2) The membership behind the token's email.
+    mp_member = await mp.get_member_by_email(email)
+    if not mp_member:
+        return _connect_problem_page(f"We couldn't find a CougConnect account for <strong>{html.escape(email)}</strong>.")
+    mp_id = mp_member.get("id")
+    active_ids = mp.active_ids_from_member_object(mp_member) or await mp.get_active_membership_ids(mp_id)
+    tier = mp.resolve_tier(active_ids)
+    if tier == "unsubscribed":
+        return _page("No Active Subscription", f"""
+            <h1>⚠️ No active membership</h1>
+            <p>The account for <strong>{html.escape(email)}</strong> doesn't have an active CougConnect membership.
+               Just paid? Give it two minutes and try again.</p>
+            <a href="{ob_url('subscribe')}" {BTN_PRIMARY}>See memberships</a>
+            <a href="{ob_url('account')}" {BTN_SECONDARY}>Back to my account</a>
+        """)
+
+    # 3) Conflicts — the same guards the verify form applies.
+    by_email = db.get_member_by_email(email)
+    if by_email and by_email["discord_id"] != discord_id:
+        db.record_verify_failure(discord_id, email, "already-linked")
+        return _connect_problem_page(
+            f"<strong>{html.escape(email)}</strong> is already linked to a different Discord account. "
+            "If that's you on another account, open a support ticket and we'll move it."
+        )
+    by_discord = db.get_member_by_discord(discord_id)
+    if by_discord and (by_discord.get("mp_email") or "").lower() != email:
+        db.record_verify_failure(discord_id, email, "discord-already-linked")
+        return _connect_problem_page(
+            "This Discord account is already verified for a different CougConnect account. "
+            "Open a support ticket and we'll sort out which one should be linked."
+        )
+
+    # 4) Into the server (best effort), then link, role, guide.
+    in_server = await _guild_join(discord_id, access)
+    old_tier = by_email["tier"] if by_email else "none"
+    if old_tier != tier:
+        db.log_tier_change(discord_id, email, old_tier, tier, reason="connect-oauth")
+    db.upsert_member(discord_id, mp_id, email, tier)
+    db.mark_unlinked_verified(mp_id)
+
+    role_ok = False
+    if in_server:
+        role_ok = await assign_role(int(discord_id), tier)
+        if not role_ok:
+            await asyncio.sleep(2)  # freshly joined members can lag the cache
+            role_ok = await assign_role(int(discord_id), tier)
+        if role_ok:
+            await assign_apartment_role(int(discord_id), mp.get_apartment_slug(mp_member))
+            asyncio.create_task(send_welcome_dm(int(discord_id), tier, mp.get_apartment_slug(mp_member), email))
+    # Not in the server yet: on_member_join restores the role and sends the guide when they arrive.
+    asyncio.create_task(wp_link.push_link(email, discord_id, username or _display_name(int(discord_id))))
+    if email and not (in_server and role_ok):  # send_welcome_dm tags the rest
+        asyncio.create_task(mailchimp.tag_verified(email))
+    log.info(f"Connect: linked discord_id={discord_id} email={email} tier={tier} in_server={in_server} role={role_ok}")
+    return _success_page(tier, in_server=in_server and role_ok)
 
 
 INACTIVE_EVENTS = {
@@ -2550,6 +2803,8 @@ async def start_web_server():
     app.router.add_post("/verify-page", handle_verify_page_post)
     app.router.add_post("/webhook", handle_legacy_webhook)
     app.router.add_get("/news.json", aggregator.handle_news_json)
+    app.router.add_get("/connect", handle_connect)
+    app.router.add_get(CONNECT_REDIRECT_PATH, handle_connect_callback)
     if WEBHOOK_URL_TOKEN:
         app.router.add_post(f"/webhook/{WEBHOOK_URL_TOKEN}", handle_webhook)
     runner = web.AppRunner(app)
