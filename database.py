@@ -123,6 +123,51 @@ def init_db():
                 conn.execute(f"ALTER TABLE news_items ADD COLUMN {col_decl}")
             except sqlite3.OperationalError:
                 pass
+        # ── Onboarding (new-member journey) ──────────────────────────────────
+        # One row per guild join; each step is stamped with a timestamp so the
+        # daily report can count what happened in a window.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS discord_joins (
+                discord_id            TEXT PRIMARY KEY,
+                joined_at             TEXT,
+                welcome_dm_sent_at    TEXT,
+                welcome_dm_failed_at  TEXT,
+                nudged_24h_at         TEXT,
+                nudged_72h_at         TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS verify_failures (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id   TEXT,
+                email        TEXT,
+                reason       TEXT,
+                attempted_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS onboarding_notices (
+                discord_id  TEXT,
+                step        TEXT,
+                sent_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, step)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mailchimp_sync (
+                mp_member_id INTEGER PRIMARY KEY,
+                email        TEXT,
+                tags         TEXT,
+                synced_at    TEXT
+            )
+        """)
+        # unlinked_members grew columns so the funnel can tell "never verified"
+        # from "verified later" without deleting the signup history.
+        for col_decl in ("email TEXT", "registered_at TEXT", "verified_at TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE unlinked_members ADD COLUMN {col_decl}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -156,6 +201,26 @@ def consume_token(token: str) -> str | None:
             return None
         conn.execute("UPDATE verify_tokens SET used = 1 WHERE token = ?", (token,))
         conn.commit()
+    return discord_id
+
+
+def peek_token(token: str) -> str | None:
+    """Validate a token WITHOUT consuming it.
+
+    The verify page checks the token up front but only burns it on success, so
+    a member who mistypes their email can correct it on the same 15-minute link
+    instead of going back to Discord for a new one.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT discord_id, expires_at, used FROM verify_tokens WHERE token = ?",
+            (token,),
+        ).fetchone()
+    if not row:
+        return None
+    discord_id, expires_at, used = row
+    if used or datetime.utcnow() > datetime.fromisoformat(expires_at):
+        return None
     return discord_id
 
 
@@ -268,19 +333,36 @@ def get_all_members() -> list[dict]:
 
 # ── Unlinked paying members (webhooks from MemberPress accounts with no Discord link) ──
 
-def record_unlinked(mp_member_id: int):
+def record_unlinked(mp_member_id: int, email: str | None = None, registered_at: str | None = None):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            INSERT INTO unlinked_members (mp_member_id) VALUES (?)
-            ON CONFLICT(mp_member_id) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
-        """, (mp_member_id,))
+            INSERT INTO unlinked_members (mp_member_id, email, registered_at) VALUES (?, ?, ?)
+            ON CONFLICT(mp_member_id) DO UPDATE SET
+                last_seen     = CURRENT_TIMESTAMP,
+                email         = COALESCE(excluded.email, unlinked_members.email),
+                registered_at = COALESCE(excluded.registered_at, unlinked_members.registered_at)
+        """, (mp_member_id, email, registered_at))
         conn.commit()
 
 
 def get_unlinked_ids() -> list[int]:
+    """Webhook-seen MemberPress accounts that still have no Discord link."""
     with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute("SELECT mp_member_id FROM unlinked_members ORDER BY last_seen DESC").fetchall()
+        rows = conn.execute(
+            "SELECT mp_member_id FROM unlinked_members WHERE verified_at IS NULL ORDER BY last_seen DESC"
+        ).fetchall()
     return [r[0] for r in rows]
+
+
+def mark_unlinked_verified(mp_member_id: int):
+    """Stop reporting a member who has since verified, but keep the row — it
+    dates their signup, which the funnel needs to measure time-to-verify."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE unlinked_members SET verified_at = ? WHERE mp_member_id = ? AND verified_at IS NULL",
+            (datetime.utcnow().isoformat(), mp_member_id),
+        )
+        conn.commit()
 
 
 def remove_unlinked(mp_member_id: int):
@@ -592,3 +674,145 @@ def get_recent_news(limit: int = 30, include_cougconnect: bool = False) -> list[
         dict(zip(["source", "title", "url", "kind", "thumbnail", "published_at", "summary"], row))
         for row in rows
     ]
+
+
+# ── Onboarding (new-member journey) ───────────────────────────────────────────
+
+_JOIN_FLAGS = ("welcome_dm_sent", "welcome_dm_failed", "nudged_24h", "nudged_72h")
+
+
+def record_join(discord_id: str):
+    """A (re)join resets the clock — the nudges are about THIS visit."""
+    now = datetime.utcnow().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO discord_joins (discord_id, joined_at) VALUES (?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                joined_at = excluded.joined_at,
+                welcome_dm_sent_at = NULL, welcome_dm_failed_at = NULL,
+                nudged_24h_at = NULL, nudged_72h_at = NULL
+        """, (discord_id, now))
+        conn.commit()
+
+
+def set_join_flag(discord_id: str, flag: str):
+    """Stamp a step as done. Creates the row for members who joined before tracking existed."""
+    assert flag in _JOIN_FLAGS
+    now = datetime.utcnow().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR IGNORE INTO discord_joins (discord_id, joined_at) VALUES (?, ?)", (discord_id, now))
+        conn.execute(f"UPDATE discord_joins SET {flag}_at = ? WHERE discord_id = ?", (now, discord_id))
+        conn.commit()
+
+
+def get_joins_due(hours: int, flag: str, window_hours: int = 72) -> list[dict]:
+    """Joins between `hours` and `hours + window_hours` old that haven't had `flag` yet.
+
+    The window keeps a long-off flag from waking up and nudging months-old rows.
+    """
+    assert flag in _JOIN_FLAGS
+    newest = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    oldest = (datetime.utcnow() - timedelta(hours=hours + window_hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            f"SELECT discord_id, joined_at FROM discord_joins "
+            f"WHERE {flag}_at IS NULL AND joined_at <= ? AND joined_at >= ? ORDER BY joined_at",
+            (newest, oldest),
+        ).fetchall()
+    return [{"discord_id": r[0], "joined_at": r[1]} for r in rows]
+
+
+def count_joins_since(hours: int) -> int:
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute("SELECT COUNT(*) FROM discord_joins WHERE joined_at >= ?", (cutoff,)).fetchone()[0]
+
+
+def count_join_flag_since(flag: str, hours: int) -> int:
+    assert flag in _JOIN_FLAGS
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(f"SELECT COUNT(*) FROM discord_joins WHERE {flag}_at >= ?", (cutoff,)).fetchone()[0]
+
+
+def count_unverified_joins_older_than(hours: int) -> int:
+    """Joined more than `hours` ago and never linked a membership."""
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM discord_joins j LEFT JOIN member_links m ON m.discord_id = j.discord_id "
+            "WHERE j.joined_at < ? AND m.discord_id IS NULL",
+            (cutoff,),
+        ).fetchone()[0]
+
+
+def record_verify_failure(discord_id: str, email: str, reason: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO verify_failures (discord_id, email, reason, attempted_at) VALUES (?, ?, ?, ?)",
+            (discord_id, email, reason, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+
+def count_verify_failures(discord_id: str, hours: int = 24) -> int:
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM verify_failures WHERE discord_id = ? AND attempted_at >= ?",
+            (discord_id, cutoff),
+        ).fetchone()[0]
+
+
+def get_verify_failures_since(hours: int) -> list[dict]:
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT discord_id, email, reason, attempted_at FROM verify_failures "
+            "WHERE attempted_at >= ? ORDER BY attempted_at DESC",
+            (cutoff,),
+        ).fetchall()
+    return [dict(zip(["discord_id", "email", "reason", "attempted_at"], r)) for r in rows]
+
+
+def onboarding_step_sent(discord_id: str, step: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM onboarding_notices WHERE discord_id = ? AND step = ?", (discord_id, step)
+        ).fetchone()
+    return row is not None
+
+
+def record_onboarding_step(discord_id: str, step: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR IGNORE INTO onboarding_notices (discord_id, step) VALUES (?, ?)", (discord_id, step))
+        conn.commit()
+
+
+def get_members_linked_days_ago(days: int) -> list[dict]:
+    """Members whose first verification was `days`..`days+1` days ago."""
+    upper = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    lower = (datetime.utcnow() - timedelta(days=days + 1)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at FROM member_links "
+            "WHERE linked_at >= ? AND linked_at < ?",
+            (lower, upper),
+        ).fetchall()
+    return [dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at"], r)) for r in rows]
+
+
+def mailchimp_synced(mp_member_id: int, tags: list[str]) -> bool:
+    """True when this member was already pushed with exactly these tags."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT tags FROM mailchimp_sync WHERE mp_member_id = ?", (mp_member_id,)).fetchone()
+    return bool(row) and row[0] == ",".join(sorted(tags))
+
+
+def record_mailchimp_sync(mp_member_id: int, email: str, tags: list[str]):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO mailchimp_sync (mp_member_id, email, tags, synced_at) VALUES (?, ?, ?, ?)",
+            (mp_member_id, email, ",".join(sorted(tags)), datetime.utcnow().isoformat()),
+        )
+        conn.commit()

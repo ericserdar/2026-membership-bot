@@ -1,0 +1,39 @@
+{
+  "_comment": "New-member journey config. Edit copy targets here without touching code. Channel IDs = CougConnect guild 1050090756649537616.",
+  "urls": {
+    "site": "https://cougconnect.com",
+    "premium": "https://cougconnect.com/premium-content/",
+    "account": "https://cougconnect.com/account/",
+    "subscribe": "https://cougconnect.com/become-a-subscriber/",
+    "shop": "https://cougconnect.com/shop/?utm_source=discord&utm_medium=onboarding&utm_campaign=new_member",
+    "youtube": "https://www.youtube.com/@CougConnect?sub_confirmation=1",
+    "invite": "https://discord.gg/4q5UJ4H3HQ"
+  },
+  "channels": {
+    "general": 1050165331894751314,
+    "news": 1540491258450153623,
+    "youtube": 1445806456187388028,
+    "verification": 1360127337554772150,
+    "rules": 1189372646970884188,
+    "support": 1455071316850769961,
+    "unsubscribed": 1360788474374000700,
+    "pickem": 1455436751337422848,
+    "announcements": 1381860671339364393,
+    "player_reports": 1369880828825305089,
+    "insider_info": 1050107287286579311,
+    "player_ama": 1198447515813564476,
+    "vc_recaps": 1395631735546576916,
+    "gold_lounge": 1082893780941815879,
+    "silver": 1082893993970507816
+  },
+  "tier_channels": {
+    "gold":    ["gold_lounge", "silver", "insider_info", "player_reports", "player_ama", "vc_recaps"],
+    "silver":  ["silver", "insider_info", "player_reports", "player_ama", "vc_recaps"],
+    "insider": ["insider_info", "player_reports", "player_ama", "vc_recaps"]
+  },
+  "ping_roles": {
+    "game_thread": 1540506842554433556,
+    "pickem": 1540506843443372083,
+    "vc_ama": 1540506845150584852
+  }
+}

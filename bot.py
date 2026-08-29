@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 
 import aggregator
 import database as db
+import mailchimp
 import memberpress as mp
 
 load_dotenv()
@@ -116,6 +117,59 @@ UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nud
 UPGRADE_NUDGE_DAILY_CAP = 50  # spread large cohorts over multiple days
 WINBACK_DAYS = 30
 
+# ── Onboarding (new-member journey) ───────────────────────────────────────────
+# Copy targets (URLs, channel IDs, per-tier channel lists, ping roles) live in
+# onboarding.json so wording and links change without a code edit. Every
+# behaviour below ships OFF and is flipped per flag on Railway — no redeploy.
+ONBOARDING_PATH = os.path.join(os.path.dirname(__file__), "onboarding.json")
+
+
+def _flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+ONBOARDING_JOIN_DM = _flag("ONBOARDING_JOIN_DM")   # DM the 3 steps when someone joins the guild
+ONBOARDING_DRIP = _flag("ONBOARDING_DRIP")         # day-1/3 unverified nudges + day-7/30 check-ins
+ONBOARDING_DRY_RUN = _flag("ONBOARDING_DRY_RUN")   # log/admin-log "would DM …" and send nothing
+ONBOARDING_DM_DAILY_CAP = int(os.getenv("ONBOARDING_DM_DAILY_CAP", "50"))
+UNVERIFIED_NUDGE_HOURS = (24, 72)   # hours after joining without verifying → nudge 1, nudge 2
+CHECKIN_DAYS = (7, 30)              # days after verifying → check-in DMs
+
+
+def _load_onboarding() -> dict:
+    try:
+        with open(ONBOARDING_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+ONBOARDING = _load_onboarding()
+
+
+def ob_url(key: str) -> str:
+    return ONBOARDING.get("urls", {}).get(key, "https://cougconnect.com")
+
+
+def ob_channel_id(key: str) -> int:
+    return int(ONBOARDING.get("channels", {}).get(key, 0) or 0)
+
+
+def ob_channel(key: str) -> str:
+    """Clickable channel mention, falling back to a plain #name if unconfigured."""
+    cid = ob_channel_id(key)
+    return f"<#{cid}>" if cid else f"#{key}"
+
+
+def ob_channel_link(key: str) -> str:
+    cid = ob_channel_id(key)
+    return f"https://discord.com/channels/{GUILD_ID}/{cid}" if cid else ob_url("invite")
+
+
+def ping_roles_link() -> str:
+    """Discord's Channels & Roles tab, where members pick their ping roles."""
+    return f"https://discord.com/channels/{GUILD_ID}/customize-community"
+
 
 def _load_json(path: str) -> list[dict]:
     try:
@@ -170,6 +224,7 @@ class CougConnectBot(commands.Bot):
         self.weekly_digest_task.start()
         self.gameday_thread_task.start()
         self.news_task.start()
+        self.onboarding_drip_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -190,7 +245,8 @@ class CougConnectBot(commands.Bot):
             title="🔐 Verify Your CougConnect Membership",
             description=(
                 "Click the button below to link your CougConnect subscription to Discord.\n\n"
-                "Your role will be assigned automatically based on your membership tier."
+                "Use the **email you subscribed with** — your role is assigned automatically "
+                "based on your membership tier, and you'll get a DM with a channel guide once you're in."
             ),
             color=discord.Color.blue(),
         )
@@ -280,10 +336,12 @@ class CougConnectBot(commands.Bot):
             for c in needs_attention:
                 lines.append(f"• <@{c['discord_id']}> (`{c['mp_email']}`) — skipped downgrade, use `/sync-member` if confirmed cancelled")
 
+        # Unverified subscribers go to email only, not Discord — but the count
+        # belongs in the funnel block so the front door gets watched daily.
+        unlinked_lines = await self._check_unlinked_members()
+        lines.extend(_onboarding_funnel_lines(verified_24h=len(new_links), never_in_discord=len(unlinked_lines)))
         await post_admin_log("\n".join(lines))
 
-        # Unverified subscribers go to email only, not Discord.
-        unlinked_lines = await self._check_unlinked_members()
         if unlinked_lines:
             body = (
                 "These members subscribed on the site but never verified in Discord — worth a nudge email.\n\n"
@@ -299,7 +357,7 @@ class CougConnectBot(commands.Bot):
         report = []
         for mp_id in db.get_unlinked_ids():
             if db.get_member_by_mp_id(mp_id):
-                db.remove_unlinked(mp_id)  # linked since we recorded them
+                db.mark_unlinked_verified(mp_id)  # linked since we recorded them — keep the row for time-to-verify
                 continue
             try:
                 member = await mp.get_member_by_id(mp_id)
@@ -610,6 +668,14 @@ class CougConnectBot(commands.Bot):
             f"Total verified: **{stats['total']}**{delta('total')}  |  Unsubscribed: {stats['unsubscribed']}{delta('unsubscribed')}",
             f"This week: 🔗 {len(new_links)} new verification(s), ❌ {len(cancels)} cancellation(s)",
         ]
+        joins_7d = db.count_joins_since(hours=168)
+        rate = f"{len(new_links) / joins_7d * 100:.0f}%" if joins_7d else "—"
+        nudges = db.count_join_flag_since("nudged_24h", 168) + db.count_join_flag_since("nudged_72h", 168)
+        lines.append(
+            f"🚪 Onboarding: {joins_7d} joined → {len(new_links)} verified ({rate})  |  "
+            f"🔔 ping-role holders: {_count_ping_role_holders()}  |  nudges sent: {nudges}  |  "
+            f"verify failures: {len(db.get_verify_failures_since(168))}"
+        )
         if prev:
             lines.append(f"_Compared to {prev['snapshot_date']}_")
         await post_admin_log("\n".join(lines))
@@ -654,6 +720,64 @@ class CougConnectBot(commands.Bot):
 
     @gameday_thread_task.before_loop
     async def before_gameday(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=17, minute=45, tzinfo=datetime.timezone.utc))  # ~10:45am MT
+    async def onboarding_drip_task(self):
+        """New-member journey DMs: nudge joiners who never verified, check in on those who did.
+
+        Nothing here re-sends. Unverified nudges are stamped on discord_joins and
+        check-ins are recorded in onboarding_notices; a failed DM counts as sent,
+        because closed DMs would otherwise be retried daily forever (same rule as
+        the upgrade nudge). Capped per day so a backlog can never flood, and gated
+        by ONBOARDING_DRIP — with ONBOARDING_DRY_RUN it only reports what it would do.
+        """
+        if not ONBOARDING_DRIP:
+            return
+        guild = get_guild()
+        if not guild:
+            return
+        tier_role_ids = {rid for rid in ROLE_IDS.values() if rid}
+        sent = 0
+
+        # 1) Joined, still here, no tier role, never verified → nudge at 24h, then 72h.
+        for hours, flag in zip(UNVERIFIED_NUDGE_HOURS, ("nudged_24h", "nudged_72h")):
+            for row in db.get_joins_due(hours, flag):
+                if sent >= ONBOARDING_DM_DAILY_CAP:
+                    break
+                discord_id = int(row["discord_id"])
+                member = guild.get_member(discord_id)
+                verified = db.get_member_by_discord(row["discord_id"]) is not None
+                if not member or verified or any(r.id in tier_role_ids for r in member.roles):
+                    db.set_join_flag(row["discord_id"], flag)  # verified since, or left — nothing to nudge
+                    continue
+                await _dm_member(discord_id, _unverified_nudge_text(), view=_join_dm_view(), what=f"unverified nudge ({hours}h)")
+                db.set_join_flag(row["discord_id"], flag)
+                sent += 1
+                await asyncio.sleep(2)
+
+        # 2) Verified and still paying → day-7 and day-30 check-ins.
+        for days in CHECKIN_DAYS:
+            step = f"checkin_d{days}"
+            for record in db.get_members_linked_days_ago(days):
+                if sent >= ONBOARDING_DM_DAILY_CAP:
+                    break
+                if record["tier"] not in ("gold", "silver", "insider"):
+                    continue
+                if db.onboarding_step_sent(record["discord_id"], step):
+                    continue
+                await _dm_member(int(record["discord_id"]), _checkin_dm_text(days, record["tier"]), what=f"day-{days} check-in")
+                db.record_onboarding_step(record["discord_id"], step)
+                sent += 1
+                await asyncio.sleep(2)
+
+        if sent >= ONBOARDING_DM_DAILY_CAP:
+            log.info(f"Onboarding drip daily cap ({ONBOARDING_DM_DAILY_CAP}) reached — resuming tomorrow.")
+        if sent:
+            log.info(f"Onboarding drip: {sent} DM(s) {'simulated' if ONBOARDING_DRY_RUN else 'sent'}")
+
+    @onboarding_drip_task.before_loop
+    async def before_onboarding_drip(self):
         await self.wait_until_ready()
 
     @tasks.loop(minutes=20)
@@ -721,6 +845,174 @@ async def send_report_email(subject: str, body_text: str, attachment_path: str |
         log.error(f"Report email failed: {e}")
         return False
     return True
+
+
+# ── Onboarding helpers ────────────────────────────────────────────────────────
+
+# MemberPress shirt-size dropdown values → the Mailchimp tag names already in use.
+# ("mediuk" is the live option value for Medium — a typo frozen into the field.)
+SIZE_LABELS = {"x-small": "XS", "small": "Small", "mediuk": "Medium", "medium": "Medium",
+               "large": "Large", "x-large": "XL", "xxl": "XXL", "3xl": "3XL"}
+
+
+async def _dm_member(discord_id: int, content: str, view: discord.ui.View | None = None, what: str = "DM") -> bool:
+    """Send a DM, honouring ONBOARDING_DRY_RUN. Returns True if it went out (or would have)."""
+    if ONBOARDING_DRY_RUN:
+        log.info(f"[dry-run] would send {what} to discord_id={discord_id}")
+        await post_admin_log(f"🧪 [dry-run] would send **{what}** to <@{discord_id}>")
+        return True
+    try:
+        user = await bot.fetch_user(discord_id)
+        await user.send(content, view=view)
+        return True
+    except Exception as e:
+        log.info(f"{what} to discord_id={discord_id} not delivered (DMs likely closed): {e}")
+        return False
+
+
+def _join_dm_text() -> str:
+    return (
+        "👋 **Welcome to the CougConnect Discord!**\n\n"
+        "Right now you can only see a couple of channels — that changes in 30 seconds:\n"
+        f"1️⃣ Tap **Verify Membership** below (or in {ob_channel('verification')}) and enter the **email you subscribed with**.\n"
+        f"2️⃣ Read the rules in {ob_channel('rules')}.\n"
+        f"3️⃣ Pick your pings in **Channels & Roles** so you know when we go live: {ping_roles_link()}\n\n"
+        f"Not a member yet? The Discord is part of a CougConnect membership → {ob_url('subscribe')}\n\n"
+        "Go Cougs 🤙"
+    )
+
+
+def _join_dm_view() -> discord.ui.View:
+    """The persistent Verify button plus link buttons — works from a DM."""
+    view = VerifyView()
+    view.add_item(discord.ui.Button(label="#verification", url=ob_channel_link("verification"), style=discord.ButtonStyle.link, emoji="📍"))
+    view.add_item(discord.ui.Button(label="Rules", url=ob_channel_link("rules"), style=discord.ButtonStyle.link, emoji="📜"))
+    return view
+
+
+def _unverified_nudge_text() -> str:
+    return (
+        "👋 Still on the outside? Verifying takes 30 seconds — tap **Verify Membership** below and enter the "
+        f"**email you subscribed with**. If it says 'not found', open a ticket in {ob_channel('support')} and "
+        "we'll sort it same day.\n\n"
+        f"Not a member yet? The Discord is part of a CougConnect membership → {ob_url('subscribe')}\n\n"
+        "Go Cougs 🤙"
+    )
+
+
+def _welcome_dm_text(tier: str, apartment_slug: str | None = None) -> str:
+    tier_perks = {
+        "gold": "As a **Gold** member you have the full run of the place — player reports, the Gold lounge, AMAs and "
+                "voice chats, plus your custom jersey and $55 in store credit every year you stay.",
+        "silver": "As a **Silver** member you get the player reports, the Silver channels and community events, the swag "
+                  "box, and $25 in store credit every year you stay.",
+        "insider": "As an **Insider** you get the player reports and the community channels — everything the crew talks about all week.",
+    }
+    tier_keys = ONBOARDING.get("tier_channels", {}).get(tier, [])
+    start_keys = ["general", "news"] + [k for k in tier_keys if k not in ("general", "news")]
+    start_here = " · ".join(ob_channel(k) for k in start_keys if ob_channel_id(k))
+    apartment_line = ""
+    cfg = APARTMENTS.get(apartment_slug) if apartment_slug else None
+    if cfg:
+        apartment_line = (f"🏠 We also gave you the **{cfg.get('label', apartment_slug)}** role — "
+                          "check out your complex's channel to connect with neighbors.\n\n")
+    return (
+        f"🎉 **You're verified — your {tier_label(tier)} role is on.**\n\n"
+        f"{tier_perks.get(tier, '')}\n\n"
+        f"{apartment_line}"
+        f"**Start here:** {start_here}\n"
+        f"🎙️ VCs and AMAs are announced in {ob_channel('announcements')} — grab **🎙️ VC & AMA Pings** in "
+        f"Channels & Roles so you don't miss them: {ping_roles_link()}\n"
+        f"🏈 Game days: a game thread opens in {ob_channel('general')}. Pick'em runs in {ob_channel('pickem')}.\n"
+        f"▶️ New podcast episodes drop in {ob_channel('youtube')} almost every day — subscribe on YouTube so "
+        f"they hit your feed too: {ob_url('youtube')}\n"
+        f"🛍️ Gear: player tees and the custom BYU jersey at the member price → {ob_url('shop')}\n\n"
+        f"Questions? Open a ticket in {ob_channel('support')} or just reply here. Go Cougs! 🏈"
+    )
+
+
+def _checkin_dm_text(days: int, tier: str) -> str:
+    credit = tier in ("silver", "gold")
+    if days == 7:
+        return (
+            "👋 **One week in — here's how to get the most out of CougConnect:**\n"
+            f"🔔 Pick your pings in Channels & Roles (VC & AMA · Pick'em · Game Thread): {ping_roles_link()}\n"
+            f"🏈 Game days: the game thread opens in {ob_channel('general')} — Pick'em is in {ob_channel('pickem')}.\n"
+            f"📰 {ob_channel('news')} pulls every BYU story into one feed; voice-chat recaps land on the site.\n"
+            f"▶️ The daily podcast is on YouTube — subscribe so episodes hit your feed: {ob_url('youtube')}\n"
+            f"🛍️ Gear: player tees and the custom jersey at the member price → {ob_url('shop')}"
+            + (" Silver and Gold members earn store credit every year they stay." if credit else "")
+            + f"\n\nAnything confusing? Reply here or open a ticket in {ob_channel('support')}. Go Cougs!"
+        )
+    return (
+        "🙏 **A month with us — thank you.** Your membership is what pays the players who show up here.\n\n"
+        "One question: what's the one thing you'd like more of? Reply to this message — a human reads every one.\n\n"
+        f"Heading to a game? Wear the crew's colors → {ob_url('shop')} (member price on the jersey)."
+        + (" Your yearly store credit unlocks at 12 months." if credit else "")
+        + "\n\nGo Cougs 🤙"
+    )
+
+
+def _count_ping_role_holders() -> int:
+    """Members holding at least one opt-in ping role (Channels & Roles uptake)."""
+    guild = get_guild()
+    ids = {int(v) for v in ONBOARDING.get("ping_roles", {}).values() if v}
+    if not guild or not ids:
+        return 0
+    return sum(1 for m in guild.members if not m.bot and any(r.id in ids for r in m.roles))
+
+
+def _onboarding_funnel_lines(verified_24h: int, never_in_discord: int) -> list[str]:
+    """Daily-report block: is the front door working?"""
+    joins = db.count_joins_since(hours=24)
+    stale = db.count_unverified_joins_older_than(hours=72)
+    dm_failed = db.count_join_flag_since("welcome_dm_failed", hours=24)
+    failures = db.get_verify_failures_since(hours=24)
+    lines = [
+        "\n**🚪 Onboarding funnel (24h)**",
+        f"👋 Joined Discord: **{joins}**  |  🔗 Verified: **{verified_24h}**  |  ⏳ Joined >72h ago, still unverified: **{stale}**",
+        f"💸 Paying, never in Discord: **{never_in_discord}**  |  📪 Welcome DMs undeliverable: **{dm_failed}**  |  ❌ Verify failures: **{len(failures)}**",
+    ]
+    if failures:
+        tops = Counter(f"{f['email']} ({f['reason']})" for f in failures).most_common(5)
+        lines.append("Failed attempts: " + ", ".join(f"`{k}` ×{n}" for k, n in tops))
+    return lines
+
+
+async def _mailchimp_sync_member(mp_member_id: int, event: str):
+    """Upsert a member into the Mailchimp audience with tier/size tags (flag-gated).
+
+    Replaces two older paths that both wrote to Mailchimp on signup — the
+    MemberPress Mailchimp-Tags plugin (which sent a double-opt-in confirmation
+    email nobody needed) and a Zap that flipped them to subscribed a minute
+    later. One writer, no confirmation email, and tags the email journey can
+    branch on (`tier:*`, later `discord-verified`).
+    """
+    if not mailchimp.SYNC_ENABLED:
+        return
+    await asyncio.sleep(20)  # let MemberPress commit the signup before reading it back
+    try:
+        member = await mp.get_member_by_id(mp_member_id)
+        if not member:
+            return
+        email = (member.get("email") or "").strip().lower()
+        if not email:
+            return
+        tier = mp.resolve_tier(mp.active_ids_from_member_object(member))
+        tags = ["Customer"]
+        if tier in ("gold", "silver", "insider"):
+            tags.append(f"tier:{tier}")
+        size = ((member.get("profile") or {}).get("mepr_what_is_your_t_shirt_size") or "").strip().lower()
+        if SIZE_LABELS.get(size):
+            tags.append(SIZE_LABELS[size])
+        if db.mailchimp_synced(mp_member_id, tags):
+            return
+        ok = await mailchimp.upsert_member(email, member.get("first_name") or "", member.get("last_name") or "", tags)
+        if ok:
+            db.record_mailchimp_sync(mp_member_id, email, tags)
+            log.info(f"Mailchimp synced {email} tags={tags} via {event}")
+    except Exception as e:
+        log.error(f"Mailchimp sync failed for mp_member_id={mp_member_id}: {e}")
 
 
 async def assign_role(discord_id: int, tier: str) -> bool:
@@ -1048,27 +1340,21 @@ def tier_label(tier: str) -> str:
     return {"gold": "Gold", "silver": "Silver", "insider": "Insider", "unsubscribed": "Unsubscribed"}.get(tier, tier.title())
 
 
-async def send_welcome_dm(discord_id: int, tier: str, apartment_slug: str | None = None):
-    """Welcome DM after a successful verification, with a tier-specific channel guide."""
-    tier_perks = {
-        "gold": "As a **Gold** member you have full access — insider reports, the Gold lounge, AMAs, and voice chats.",
-        "silver": "As a **Silver** member you get insider reports and the Silver channels, plus community events.",
-        "insider": "As an **Insider** you have access to the community channels and insider discussions.",
-    }
-    apartment_line = ""
-    cfg = APARTMENTS.get(apartment_slug) if apartment_slug else None
-    if cfg:
-        apartment_line = f"🏠 We also gave you the **{cfg.get('label', apartment_slug)}** role — check out your complex's channel to connect with neighbors.\n\n"
-    try:
-        user = await bot.fetch_user(discord_id)
-        await user.send(
-            f"🎉 Welcome to CougConnect! Your **{tier_label(tier)}** role is set.\n\n"
-            f"{tier_perks.get(tier, '')}\n\n"
-            f"{apartment_line}"
-            "Introduce yourself in the community channel and jump into the conversation. Go Cougs! 🏈"
-        )
-    except Exception:
-        log.info(f"Could not DM welcome to discord_id={discord_id} (DMs likely closed)")
+async def send_welcome_dm(discord_id: int, tier: str, apartment_slug: str | None = None, email: str | None = None):
+    """Welcome DM after a successful verification: tier perks + a linked channel guide.
+
+    A failed DM is recorded (not just logged) so the daily report can count
+    members who got a role but no orientation. Also tags the member
+    `discord-verified` in Mailchimp (flag-gated) so the email journey stops
+    nudging them to verify.
+    """
+    sent = await _dm_member(discord_id, _welcome_dm_text(tier, apartment_slug), what="welcome DM")
+    db.set_join_flag(str(discord_id), "welcome_dm_sent" if sent else "welcome_dm_failed")
+    if email:
+        try:
+            await mailchimp.tag_verified(email)
+        except Exception as e:
+            log.info(f"Mailchimp verified-tag failed for {email}: {e}")
 
 
 def add_active_subscriptions_field(embed: discord.Embed, mp_member: dict | None):
@@ -1107,7 +1393,8 @@ class VerifyView(discord.ui.View):
                     description=(
                         f"Your account is already linked to `{existing['mp_email']}` "
                         f"with the **{tier_label(existing['tier'])}** role.\n\n"
-                        "If you need to update your membership, contact an admin."
+                        f"Just renewed or upgraded? Use **Re-sync My Role** in {ob_channel('unsubscribed')}. "
+                        f"Wrong email on file? Open a ticket in {ob_channel('support')}."
                     ),
                     color=tier_color(existing["tier"]),
                 )
@@ -1236,6 +1523,38 @@ class FlagReasonView(discord.ui.View):
 
 
 @bot.event
+async def on_member_join(member: discord.Member):
+    """First contact. A new joiner can only see three channels, so say the one
+    thing that matters — verify — and hand them the button to do it from the DM."""
+    if member.bot or member.guild.id != GUILD_ID:
+        return
+    db.record_join(str(member.id))
+    existing = db.get_member_by_discord(str(member.id))
+    if existing and existing["tier"] in ("gold", "silver", "insider"):
+        # A rejoin: restore the role they already earned and skip the tour.
+        try:
+            await assign_role(member.id, existing["tier"])
+        except Exception as e:
+            log.error(f"Role restore on rejoin failed for discord_id={member.id}: {e}")
+        if ONBOARDING_JOIN_DM:
+            await _dm_member(member.id, f"👋 Welcome back! Your **{tier_label(existing['tier'])}** role is restored. Go Cougs 🤙", what="rejoin DM")
+        return
+    if not ONBOARDING_JOIN_DM:
+        return
+    sent = await _dm_member(member.id, _join_dm_text(), view=_join_dm_view(), what="join DM")
+    log.info(f"Join DM {'sent' if sent else 'not delivered'} to discord_id={member.id}")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    # The onboarding DMs say "reply here" — route those replies to the admin log
+    # so a human actually sees them. Guild messages pass straight through.
+    if message.guild is None and not message.author.bot and message.content:
+        await post_admin_log(f"💬 **DM reply from** <@{message.author.id}> ({message.author}): {message.content[:1500]}")
+    await bot.process_commands(message)
+
+
+@bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.guild_id != GUILD_ID or str(payload.emoji) != FLAG_EMOJI:
         return
@@ -1329,7 +1648,7 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
     old_tier = existing["tier"] if existing else "none"
     db.log_tier_change(str(user.id), email, old_tier, tier, reason="link-member")
     db.upsert_member(str(user.id), mp_id, email, tier)
-    db.remove_unlinked(mp_id)
+    db.mark_unlinked_verified(mp_id)
     success = await assign_role(user.id, tier)
 
     if success:
@@ -1489,14 +1808,16 @@ async def faq(interaction: discord.Interaction, number: int | None = None):
             description=item["a"],
             color=discord.Color.blue(),
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
+    # Ephemeral: a new member running /faq in a busy channel shouldn't dump
+    # thirteen answers on everyone else.
     embed = discord.Embed(title="CougConnect FAQ", color=discord.Color.blue())
     for i, item in enumerate(faqs, 1):
         embed.add_field(name=f"{i}. {item['q']}", value=item["a"], inline=False)
     embed.set_footer(text="Use /faq <number> to view a specific answer")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="sync-all", description="Manually trigger a full membership sync against MemberPress")
@@ -1913,6 +2234,48 @@ def _page(title: str, body: str) -> web.Response:
     return web.Response(text=html, content_type="text/html")
 
 
+LINK_STYLE = 'style="color:#3b82f6;"'
+NOTICE_STYLE = ('style="background:#3b1d1d;border:1px solid #7f1d1d;border-radius:8px;padding:12px 14px;'
+                'color:#fecaca;font-size:14px;line-height:1.5;margin-bottom:16px;text-align:left"')
+BTN_PRIMARY = ('style="display:block;padding:12px;margin:8px 0;background:#2563eb;color:#fff;border-radius:8px;'
+               'text-decoration:none;font-weight:600"')
+BTN_SECONDARY = ('style="display:block;padding:12px;margin:8px 0;background:#1f2937;color:#fff;border-radius:8px;'
+                 'text-decoration:none;font-weight:600"')
+
+
+def _verify_form(token: str, discord_id: str, notice: str = "", email: str = "") -> str:
+    return f"""
+        <h1>🔐 Verify Membership</h1>
+        {notice}
+        <p>Enter the email you used when you subscribed on cougconnect.com — that's the only one that will match.</p>
+        <form method="POST" action="/verify-page">
+          <input type="hidden" name="token" value="{html.escape(token, quote=True)}">
+          <input type="hidden" name="discord_id" value="{html.escape(discord_id, quote=True)}">
+          <input type="email" name="email" placeholder="your@email.com" value="{html.escape(email, quote=True)}" required autofocus>
+          <button type="submit">Verify My Membership</button>
+        </form>
+    """
+
+
+def _verify_failure_page(token: str, discord_id: str, email: str, reason: str, title: str, message_html: str) -> web.Response:
+    """Re-render the form with the error so a wrong email can be corrected on the same link.
+
+    Records the attempt; a second failure inside 24h adds the support-ticket
+    escape hatch and pings the admin log, so nobody bounces off silently.
+    """
+    db.record_verify_failure(discord_id, email, reason)
+    failures = db.count_verify_failures(discord_id, hours=24)
+    extra = ""
+    if failures >= 2:
+        extra = (f'<p style="font-size:13px">Still stuck? <a href="{ob_channel_link("support")}" {LINK_STYLE}>Open a '
+                 f'support ticket</a> and we\'ll link you by hand — usually same day.</p>')
+        asyncio.create_task(post_admin_log(
+            f"⚠️ Verify failed {failures}× in 24h — <@{discord_id}> tried `{email}` ({reason})"
+        ))
+    notice = f"<div {NOTICE_STYLE}>{message_html}</div>{extra}"
+    return _page(title, _verify_form(token, discord_id, notice=notice, email=email))
+
+
 async def handle_verify_page_get(request: web.Request) -> web.Response:
     """Serve the email entry form."""
     token = request.rel_url.query.get("token", "")
@@ -1924,17 +2287,7 @@ async def handle_verify_page_get(request: web.Request) -> web.Response:
             <p>This verification link is invalid. Please click the button in Discord again.</p>
         """)
 
-    form = f"""
-        <h1>🔐 Verify Membership</h1>
-        <p>Enter the email address associated with your CougConnect subscription.</p>
-        <form method="POST" action="/verify-page">
-          <input type="hidden" name="token" value="{html.escape(token, quote=True)}">
-          <input type="hidden" name="discord_id" value="{html.escape(discord_id, quote=True)}">
-          <input type="email" name="email" placeholder="your@email.com" required autofocus>
-          <button type="submit">Verify My Membership</button>
-        </form>
-    """
-    return _page("Verify Membership", form)
+    return _page("Verify Membership", _verify_form(token, discord_id))
 
 
 async def handle_verify_page_post(request: web.Request) -> web.Response:
@@ -1952,8 +2305,9 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     if not all([token, discord_id, email]):
         return _page("Error", "<h1>❌ Missing Info</h1><p>Please go back and fill in your email address.</p>")
 
-    # Validate token
-    stored_discord_id = db.consume_token(token)
+    # Validate the token without burning it — it's only consumed on success, so a
+    # mistyped email can be retried on the same link inside the 15 minutes.
+    stored_discord_id = db.peek_token(token)
     if not stored_discord_id:
         return _page("Link Expired", """
             <h1>⏰ Link Expired</h1>
@@ -1963,24 +2317,21 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     if stored_discord_id != discord_id:
         return _page("Error", "<h1>❌ Invalid Link</h1><p>This link is not valid for your account.</p>")
 
-    # Check if email is already linked to a different Discord account
+    # Email already linked to a different Discord account
     existing_link = db.get_member_by_email(email)
     if existing_link and existing_link["discord_id"] != discord_id:
-        return _page("Already Linked", f"""
-            <h1>⚠️ Email Already Linked</h1>
-            <p><strong>{safe_email}</strong> is already connected to a different Discord account.</p>
-            <p>If this is a mistake, please contact an admin in the Discord server.</p>
-        """)
+        return _verify_failure_page(token, discord_id, email, "already-linked", "Already Linked",
+            f"<strong>{safe_email}</strong> is already connected to a different Discord account. "
+            f"If that's you on another account, <a href=\"{ob_channel_link('support')}\" {LINK_STYLE}>open a support ticket</a> "
+            "and we'll move it. Otherwise try a different email below.")
 
     # Look up member in MemberPress
     mp_member = await mp.get_member_by_email(email)
     if not mp_member:
-        return _page("Not Found", f"""
-            <h1>❌ Email Not Found</h1>
-            <p>No CougConnect account was found for <strong>{safe_email}</strong>.</p>
-            <p>Make sure you're using the email you signed up with, or
-               <a href="https://cougconnect.com" style="color:#3b82f6;">visit CougConnect</a> to create an account.</p>
-        """)
+        return _verify_failure_page(token, discord_id, email, "not-found", "Not Found",
+            f"No CougConnect account was found for <strong>{safe_email}</strong>. Double-check the email you used at "
+            f"checkout — it's on your welcome email and your <a href=\"{ob_url('account')}\" {LINK_STYLE}>account page</a>. "
+            f"Not a member yet? <a href=\"{ob_url('subscribe')}\" {LINK_STYLE}>Subscribe here</a>.")
 
     mp_id = mp_member.get("id")
     active_ids = mp.active_ids_from_member_object(mp_member)
@@ -1989,35 +2340,39 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
     tier = mp.resolve_tier(active_ids)
 
     if tier == "unsubscribed":
-        return _page("No Active Subscription", f"""
-            <h1>⚠️ No Active Subscription</h1>
-            <p>The account for <strong>{safe_email}</strong> doesn't have an active CougConnect membership.</p>
-            <p><a href="https://cougconnect.com/become-a-subscriber/" style="color:#3b82f6;">Subscribe here</a>
-               to get access.</p>
-        """)
+        return _verify_failure_page(token, discord_id, email, "no-active-sub", "No Active Subscription",
+            f"The account for <strong>{safe_email}</strong> doesn't have an active CougConnect membership. "
+            "Just paid? Give it two minutes and try again. Otherwise "
+            f"<a href=\"{ob_url('subscribe')}\" {LINK_STYLE}>subscribe here</a> or check your "
+            f"<a href=\"{ob_url('account')}\" {LINK_STYLE}>account page</a>.")
 
+    db.consume_token(token)
     db.upsert_member(discord_id, mp_id, email, tier)
-    db.remove_unlinked(mp_id)
+    db.mark_unlinked_verified(mp_id)
     success = await assign_role(int(discord_id), tier)
 
     if not success:
         log.error(f"Role assignment failed for discord_id={discord_id}")
-        return _page("Error", """
+        return _page("Error", f"""
             <h1>⚠️ Role Assignment Failed</h1>
             <p>We verified your membership but couldn't assign your Discord role.
-               Please contact an admin in the Discord server.</p>
+               Please <a href="{ob_channel_link('support')}" {LINK_STYLE}>open a support ticket</a> and we'll fix it by hand.</p>
         """)
 
     apartment_slug = mp.get_apartment_slug(mp_member)
     await assign_apartment_role(int(discord_id), apartment_slug)
 
     log.info(f"Verified discord_id={discord_id} email={email} tier={tier} apartment={apartment_slug}")
-    asyncio.create_task(send_welcome_dm(int(discord_id), tier, apartment_slug))
+    asyncio.create_task(send_welcome_dm(int(discord_id), tier, apartment_slug, email))
     tier_display = tier_label(tier)
+    home_key = {"gold": "gold_lounge", "silver": "silver", "insider": "insider_info"}.get(tier, "general")
     return _page("Verified!", f"""
         <h1>✅ You're Verified!</h1>
-        <p>Your <strong>{tier_display}</strong> membership has been confirmed.</p>
-        <p>Head back to Discord — your <strong>{tier_display}</strong> role has been assigned. You're all set!</p>
+        <p>Your <strong>{tier_display}</strong> role is on. We also sent you a Discord DM with a channel guide.</p>
+        <a href="{ob_channel_link(home_key)}" {BTN_PRIMARY}>Open your channels</a>
+        <a href="{ping_roles_link()}" {BTN_SECONDARY}>Pick your pings (Channels &amp; Roles)</a>
+        <a href="{ob_channel_link('rules')}" {BTN_SECONDARY}>Read the rules</a>
+        <a href="{ob_url('youtube')}" {BTN_SECONDARY}>▶ Subscribe on YouTube — daily podcast</a>
     """)
 
 
@@ -2035,6 +2390,12 @@ REACTIVATE_EVENTS = {
     "subscription-created", "transaction-completed",
     "member-signup-completed", "subscription-paused",
     "subscription-stopped", "subscription-cancelled",
+}
+
+# Signup / tier-change events that (re)sync the member into the Mailchimp audience.
+MAILCHIMP_SYNC_EVENTS = {
+    "member-signup-completed", "subscription-created",
+    "subscription-upgraded", "subscription-downgraded",
 }
 
 # MemberPress fires the same event in bursts; drop repeats seen within this window
@@ -2144,16 +2505,21 @@ async def handle_webhook(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
     event = data.get("event", "")
-    member_data = data.get("data", {}).get("member") or data.get("member") or {}
-    mp_member_id = member_data.get("id") or data.get("data", {}).get("member_id")
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    member_data = payload.get("member") or data.get("member") or {}
+    if not member_data and data.get("type") == "member":
+        member_data = payload  # member-* events carry the member object itself
+    mp_member_id = member_data.get("id") or payload.get("member_id")
 
     if not mp_member_id:
         return web.json_response({"status": "ignored — no member_id"})
 
     mp_member_id = int(mp_member_id)
+    if event in MAILCHIMP_SYNC_EVENTS:
+        asyncio.create_task(_mailchimp_sync_member(mp_member_id, event))
     record = db.get_member_by_mp_id(mp_member_id)
     if not record:
-        db.record_unlinked(mp_member_id)
+        db.record_unlinked(mp_member_id, member_data.get("email"), member_data.get("registered_at"))
         log.info(f"Webhook for unlinked mp_member_id={mp_member_id} — recorded for daily report.")
         return web.json_response({"status": "ignored — member not linked"})
 

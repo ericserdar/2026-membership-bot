@@ -22,5 +22,33 @@
   {
     "q": "What is included in the exclusive Swag bag?",
     "a": "Each exclusive Swag bag comes with a player t-shirt, signed posters, and other surprises that celebrate your support of CougConnect athletes."
+  },
+  {
+    "q": "How do I get into the Discord?",
+    "a": "The Discord is part of your CougConnect membership. Join with the invite link in your welcome email (or https://discord.gg/4q5UJ4H3HQ), then click **Verify Membership** in <#1360127337554772150> and enter the email you subscribed with. Your channels unlock automatically."
+  },
+  {
+    "q": "I joined but can't see the channels",
+    "a": "You're not verified yet. Click **Verify Membership** in <#1360127337554772150> and enter the **email you used at checkout** — that's the only email that works. Still stuck after that? Open a ticket in <#1455071316850769961>."
+  },
+  {
+    "q": "Verification says my email wasn't found",
+    "a": "Use the exact email you subscribed with on cougconnect.com — it's in your welcome email and on your account page (https://cougconnect.com/account/). If you just paid, wait two minutes and try again. If it still fails, open a ticket in <#1455071316850769961> and we'll link you by hand."
+  },
+  {
+    "q": "How do I get notified for voice chats and AMAs?",
+    "a": "Open **Channels & Roles** at the top of the channel list and pick your pings: 🎙️ VC & AMA Pings, 🎯 Pick'em Pings, 🏈 Game Thread Pings. VCs and AMAs are announced in <#1381860671339364393>."
+  },
+  {
+    "q": "Where's the content mentioned on the podcast?",
+    "a": "Three places: articles and player reports on https://cougconnect.com/premium-content/, the conversation here in Discord (start with <#1050107287286579311> and <#1369880828825305089>), and the daily CougConnect Podcast on YouTube — subscribe at https://www.youtube.com/@CougConnect?sub_confirmation=1 so new episodes hit your feed."
+  },
+  {
+    "q": "Where's the podcast?",
+    "a": "New episodes and shorts go up almost every day at https://www.youtube.com/@CougConnect?sub_confirmation=1 and get posted in <#1445806456187388028>. Hit subscribe on YouTube so you never miss one."
+  },
+  {
+    "q": "Do members get a deal on merch?",
+    "a": "Yes. The custom BYU replica jersey is $55 for members (public price $75) — Gold members get one on us. Silver and Gold members also earn store credit every year they stay ($25 Silver / $55 Gold), and swag boxes ship after each eligibility window. Shop: https://cougconnect.com/shop/"
   }
 ]
