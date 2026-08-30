@@ -258,15 +258,33 @@ class CougConnectBot(commands.Bot):
         await self._post_unsubscribed_embed()
         await post_admin_log("✅ CougConnect bot online and ready.")
 
-    async def _post_verify_embed(self):
-        channel = self.get_channel(VERIFY_CHANNEL_ID)
+    async def _upsert_button_embed(self, channel_id: int, embed: discord.Embed, view: discord.ui.View, what: str):
+        """Keep one button embed per channel across restarts — quietly.
+
+        Editing the existing message in place produces no new message, so no
+        unread badge and no push notification for anyone; a fresh send (first
+        run, or the old one was deleted) goes out silent (SUPPRESS_NOTIFICATIONS).
+        """
+        channel = self.get_channel(channel_id)
         if not channel:
             return
-        # Delete any old bot verify embeds and repost fresh
-        async for msg in channel.history(limit=20):
-            if msg.author == self.user and msg.components:
-                await msg.delete()
-                break
+        existing = None
+        try:
+            async for msg in channel.history(limit=20):
+                if msg.author == self.user and msg.components:
+                    existing = msg
+                    break
+        except discord.Forbidden:
+            log.warning(f"No Read Message History permission in {what} channel {channel_id} — sending fresh")
+        if existing:
+            try:
+                await existing.edit(embed=embed, view=view)
+                return
+            except discord.HTTPException as e:
+                log.warning(f"Could not edit the {what} embed ({e}); sending a fresh one silently")
+        await channel.send(embed=embed, view=view, silent=True)
+
+    async def _post_verify_embed(self):
         embed = discord.Embed(
             title="🔐 Verify Your CougConnect Membership",
             description=(
@@ -277,19 +295,9 @@ class CougConnectBot(commands.Bot):
             color=discord.Color.blue(),
         )
         embed.set_footer(text="CougConnect — Insider BYU Athletics Coverage")
-        await channel.send(embed=embed, view=VerifyView())
+        await self._upsert_button_embed(VERIFY_CHANNEL_ID, embed, VerifyView(), "verify")
 
     async def _post_unsubscribed_embed(self):
-        channel = self.get_channel(UNSUBSCRIBED_CHANNEL_ID)
-        if not channel:
-            return
-        try:
-            async for msg in channel.history(limit=20):
-                if msg.author == self.user and msg.components:
-                    await msg.delete()
-                    break
-        except discord.Forbidden:
-            log.warning(f"No Read Message History permission in unsubscribed channel {UNSUBSCRIBED_CHANNEL_ID} — skipping cleanup")
         embed = discord.Embed(
             title="🔄 Reactivate Your CougConnect Membership",
             description=(
@@ -300,7 +308,7 @@ class CougConnectBot(commands.Bot):
             color=discord.Color.blue(),
         )
         embed.set_footer(text="CougConnect — Insider BYU Athletics Coverage")
-        await channel.send(embed=embed, view=ReSyncView())
+        await self._upsert_button_embed(UNSUBSCRIBED_CHANNEL_ID, embed, ReSyncView(), "unsubscribed")
 
     @tasks.loop(hours=1)
     async def cleanup_tokens_task(self):
@@ -1109,6 +1117,9 @@ async def _mailchimp_sync_member(mp_member_id: int, event: str):
         tags = ["Customer"]
         if tier in ("gold", "silver", "insider"):
             tags.append(f"tier:{tier}")
+            # One umbrella trigger for the Mailchimp journeys: the plan caps a journey at
+            # four points, so the drip is three short journeys that all start here.
+            tags.append("new-member")
         size = ((member.get("profile") or {}).get("mepr_what_is_your_t_shirt_size") or "").strip().lower()
         if SIZE_LABELS.get(size):
             tags.append(SIZE_LABELS[size])
