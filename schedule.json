@@ -7,8 +7,22 @@
   {"date": "2026-10-17", "sport": "football", "opponent": "Notre Dame", "home": true, "time": null, "tv": null},
   {"date": "2026-10-24", "sport": "football", "opponent": "UCF", "home": false, "time": null, "tv": null},
   {"date": "2026-10-31", "sport": "football", "opponent": "Arizona State", "home": true, "time": null, "tv": null},
+  {"date": "2026-11-02", "sport": "basketball", "opponent": "Ohio State", "home": true, "time": null, "tv": null},
+  {"date": "2026-11-06", "sport": "basketball", "opponent": "Omaha", "home": true, "time": null, "tv": null},
   {"date": "2026-11-07", "sport": "football", "opponent": "Utah", "home": false, "time": null, "tv": null},
+  {"date": "2026-11-10", "sport": "basketball", "opponent": "Queens", "home": true, "time": null, "tv": null},
+  {"date": "2026-11-12", "sport": "basketball", "opponent": "Montana State", "home": true, "time": null, "tv": null},
   {"date": "2026-11-14", "sport": "football", "opponent": "Baylor", "home": true, "time": null, "tv": null},
+  {"date": "2026-11-18", "sport": "basketball", "opponent": "Northern Colorado", "home": true, "time": null, "tv": null},
   {"date": "2026-11-21", "sport": "football", "opponent": "Kansas", "home": false, "time": null, "tv": null},
-  {"date": "2026-11-28", "sport": "football", "opponent": "Cincinnati", "home": true, "time": null, "tv": null}
+  {"date": "2026-11-23", "sport": "basketball", "opponent": "Washington", "home": false, "time": "3:00 PM MT", "tv": "ESPN2"},
+  {"date": "2026-11-24", "sport": "basketball", "opponent": "TBD (Maui Invitational)", "home": false, "time": null, "tv": null},
+  {"date": "2026-11-25", "sport": "basketball", "opponent": "TBD (Maui Invitational)", "home": false, "time": null, "tv": null},
+  {"date": "2026-11-28", "sport": "football", "opponent": "Cincinnati", "home": true, "time": null, "tv": null},
+  {"date": "2026-12-05", "sport": "basketball", "opponent": "Northwestern", "home": true, "time": null, "tv": null},
+  {"date": "2026-12-09", "sport": "basketball", "opponent": "Utah State", "home": true, "time": null, "tv": null},
+  {"date": "2026-12-12", "sport": "basketball", "opponent": "Cal State Fullerton", "home": true, "time": null, "tv": null},
+  {"date": "2026-12-15", "sport": "basketball", "opponent": "Weber State", "home": true, "time": null, "tv": null},
+  {"date": "2026-12-19", "sport": "basketball", "opponent": "San Diego State", "home": false, "time": "8:30 PM MT", "tv": null},
+  {"date": "2026-12-22", "sport": "basketball", "opponent": "La Salle", "home": true, "time": null, "tv": null}
 ]
