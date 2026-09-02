@@ -172,6 +172,20 @@ def init_db():
                 used        INTEGER DEFAULT 0
             )
         """)
+        # One row per game-week channel the bot opened. Close only ever acts on
+        # channels listed here, so a hand-made channel can never be deleted by
+        # the scheduler no matter what it's named.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gameday_channels (
+                channel_id  TEXT PRIMARY KEY,
+                game_date   TEXT,
+                opponent    TEXT,
+                sport       TEXT,
+                close_on    TEXT,
+                opened_at   TEXT,
+                closed_at   TEXT
+            )
+        """)
         # unlinked_members grew columns so the funnel can tell "never verified"
         # from "verified later" without deleting the signup history.
         for col_decl in ("email TEXT", "registered_at TEXT", "verified_at TEXT"):
@@ -856,5 +870,65 @@ def record_mailchimp_sync(mp_member_id: int, email: str, tags: list[str]):
         conn.execute(
             "INSERT OR REPLACE INTO mailchimp_sync (mp_member_id, email, tags, synced_at) VALUES (?, ?, ?, ?)",
             (mp_member_id, email, ",".join(sorted(tags)), datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+
+# ── Game-week channels ────────────────────────────────────────────────────────
+
+def record_gameday_channel(channel_id: str, game_date: str, opponent: str,
+                           sport: str, close_on: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO gameday_channels "
+            "(channel_id, game_date, opponent, sport, close_on, opened_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (str(channel_id), game_date, opponent, sport, close_on,
+             datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+
+def gameday_channel_open(game_date: str, opponent: str) -> str | None:
+    """Channel id already open for this game, or None. Keeps opens idempotent."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT channel_id FROM gameday_channels "
+            "WHERE game_date = ? AND opponent = ? AND closed_at IS NULL",
+            (game_date, opponent),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def get_gameday_channels_due(on_or_before: str) -> list[dict]:
+    """Open channels whose close date has arrived.
+
+    `<=` rather than `=` so a week the bot slept through still gets cleaned up
+    on the next run instead of leaving the channel open forever.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM gameday_channels WHERE closed_at IS NULL AND close_on <= ? "
+            "ORDER BY close_on",
+            (on_or_before,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_open_gameday_channels() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM gameday_channels WHERE closed_at IS NULL ORDER BY game_date"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_gameday_channel_closed(channel_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE gameday_channels SET closed_at = ? WHERE channel_id = ?",
+            (datetime.utcnow().isoformat(), str(channel_id)),
         )
         conn.commit()

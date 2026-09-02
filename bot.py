@@ -15,6 +15,7 @@ from collections import Counter
 import hashlib
 import hmac
 import html
+import io
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ import sys
 import datetime
 from datetime import datetime as dt, timezone
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import aiohttp.web as web
@@ -92,6 +94,45 @@ NEWS_CHANNEL_ID = int(os.getenv("DISCORD_NEWS_CHANNEL_ID", "0"))
 # never silence the feature outright.
 MILESTONE_CHANNEL_ID = int(os.getenv("DISCORD_MILESTONE_CHANNEL_ID", "0")) or GENERAL_CHANNEL_ID
 
+# Feature switches read from Railway env vars, so a behaviour flips without a
+# redeploy. Defined here because the game-week config below is its first caller.
+def _flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── Game-week channels ────────────────────────────────────────────────────────
+# One channel per BYU game: opened Monday morning of game week, deleted Sunday
+# 23:59 MT after its transcript is archived to the admin log. Replaces the old
+# game-day thread in #general, which lasted a single day and was public.
+#
+# All times are America/Denver, not a fixed UTC offset — a fixed offset would
+# fire an hour early for the November games, after DST ends.
+MOUNTAIN = ZoneInfo("America/Denver")
+GAMEDAY_OPEN_TIME = datetime.time(hour=8, minute=30, tzinfo=MOUNTAIN)   # Monday of game week
+GAMEDAY_CLOSE_TIME = datetime.time(hour=23, minute=59, tzinfo=MOUNTAIN)  # Sunday that week
+
+# Ships OFF. GAMEDAY_DRY_RUN reports both runs to the admin log and touches
+# nothing — the close half deletes a channel outright, so it gets a rehearsal.
+GAMEDAY_CHANNELS = _flag("GAMEDAY_CHANNELS")
+GAMEDAY_DRY_RUN = _flag("GAMEDAY_DRY_RUN")
+
+# Football games land in Football Info, basketball in Basketball.
+GAMEDAY_CATEGORY_IDS = {
+    "football": int(os.getenv("DISCORD_CATEGORY_FOOTBALL_ID", "1395637847041511506")),
+    "basketball": int(os.getenv("DISCORD_CATEGORY_BASKETBALL_ID", "1395638029737132103")),
+}
+
+# Who can see a game-week channel. @everyone is denied; these are granted.
+# Names are documentation — Discord enforces the IDs.
+GAMEDAY_ACCESS_ROLE_IDS = [int(x) for x in os.getenv(
+    "DISCORD_GAMEDAY_ROLE_IDS",
+    "1082893434827845643,"   # Gold Subscriber
+    "1082893184402722876,"   # Silver Subscriber
+    "1359380692202553434,"   # Cougar Insider
+    "1454954937610932325,"   # Verified Insider
+    "1359536444451983400",   # Legacy Cougar Insider
+).split(",") if x.strip()]
+
 # Mods/admins react with this emoji to flag a message: it's logged to the mod
 # log channel + DB, then deleted. Only members with Manage Messages can trigger it.
 FLAG_EMOJI = os.getenv("FLAG_EMOJI", "🚩")
@@ -133,9 +174,6 @@ WINBACK_DAYS = 30
 # behaviour below ships OFF and is flipped per flag on Railway — no redeploy.
 ONBOARDING_PATH = os.path.join(os.path.dirname(__file__), "onboarding.json")
 
-
-def _flag(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 ONBOARDING_JOIN_DM = _flag("ONBOARDING_JOIN_DM")   # DM the 3 steps when someone joins the guild
@@ -248,7 +286,8 @@ class CougConnectBot(commands.Bot):
         self.upgrade_nudge_task.start()
         self.sponsor_spotlight_task.start()
         self.weekly_digest_task.start()
-        self.gameday_thread_task.start()
+        self.gameday_open_task.start()
+        self.gameday_close_task.start()
         self.news_task.start()
         self.onboarding_drip_task.start()
 
@@ -718,42 +757,32 @@ class CougConnectBot(commands.Bot):
     async def before_weekly_digest(self):
         await self.wait_until_ready()
 
-    @tasks.loop(time=datetime.time(hour=14, minute=30, tzinfo=datetime.timezone.utc))  # ~8:30am MT
-    async def gameday_thread_task(self):
-        """Open a game-day thread in the general channel on BYU game days."""
-        today = dt.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
-        games = [g for g in _load_json(SCHEDULE_PATH) if g["date"] == today]
-        if not games:
+    @tasks.loop(time=GAMEDAY_OPEN_TIME)
+    async def gameday_open_task(self):
+        """Monday of game week: open a members-only channel per BYU game."""
+        if not GAMEDAY_CHANNELS:
             return
-        channel = self.get_channel(GENERAL_CHANNEL_ID)
-        if not channel:
+        today = dt.now(MOUNTAIN).date()
+        if today.weekday() != 0:  # Monday
             return
-        for game in games:
-            vs_at = "vs" if game.get("home") else "at"
-            emoji = "🏈" if game.get("sport") == "football" else "🏀"
-            name = f"{emoji} BYU {vs_at} {game['opponent']} — Game Thread"
-            try:
-                thread = await channel.create_thread(
-                    name=name,
-                    type=discord.ChannelType.public_thread,
-                    auto_archive_duration=1440,
-                )
-                details = []
-                if game.get("time"):
-                    details.append(f"🕐 Kickoff: **{game['time']}**")
-                if game.get("tv"):
-                    details.append(f"📺 Watch on **{game['tv']}**")
-                await thread.send(
-                    f"**It's game day, Cougar Nation!** BYU {vs_at} **{game['opponent']}** 🎉\n"
-                    + ("\n".join(details) + "\n" if details else "")
-                    + "\nDrop your predictions and talk the game right here. Go Cougs!"
-                )
-                log.info(f"Game-day thread created: {name}")
-            except Exception as e:
-                log.error(f"Game-day thread failed: {e}")
+        for game in _games_for_week_of(today):
+            await open_gameday_channel(game)
 
-    @gameday_thread_task.before_loop
-    async def before_gameday(self):
+    @gameday_open_task.before_loop
+    async def before_gameday_open(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=GAMEDAY_CLOSE_TIME)
+    async def gameday_close_task(self):
+        """Sunday 23:59 MT: archive each game-week channel's transcript, then delete it."""
+        if not GAMEDAY_CHANNELS:
+            return
+        today = dt.now(MOUNTAIN).date().isoformat()
+        for row in db.get_gameday_channels_due(today):
+            await close_gameday_channel(row)
+
+    @gameday_close_task.before_loop
+    async def before_gameday_close(self):
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=17, minute=45, tzinfo=datetime.timezone.utc))  # ~10:45am MT
@@ -844,6 +873,268 @@ async def post_admin_log(message: str):
             await channel.send(message)
         except Exception as e:
             log.error(f"Failed to post admin log: {e}")
+
+
+# ── Game-week channels ────────────────────────────────────────────────────────
+
+def _game_week_monday(game_date: datetime.date) -> datetime.date:
+    """Monday of the week a game falls in. Saturday Sep 5 → Monday Aug 31."""
+    return game_date - datetime.timedelta(days=game_date.weekday())
+
+
+def _game_week_sunday(game_date: datetime.date) -> datetime.date:
+    return _game_week_monday(game_date) + datetime.timedelta(days=6)
+
+
+def _games_for_week_of(monday: datetime.date) -> list[dict]:
+    """Every scheduled game whose week starts on this Monday.
+
+    A doubleheader week opens one channel per game; the schedule has none today
+    but nothing here assumes a single game.
+    """
+    out = []
+    for game in _load_json(SCHEDULE_PATH):
+        try:
+            game_date = datetime.date.fromisoformat(game["date"])
+        except (KeyError, ValueError):
+            log.error(f"Schedule entry has a bad date, skipped: {game!r}")
+            continue
+        if _game_week_monday(game_date) == monday:
+            out.append(game)
+    return out
+
+
+def _gameday_channel_name(game: dict, week_games: list[dict] | None = None) -> str:
+    """Discord lowercases channel names and turns spaces into dashes, so build
+    the final form ourselves rather than letting it mangle a display string.
+
+    Two games in one week can share an opponent — the Maui Invitational has
+    back-to-back "TBD" entries — which would produce two identically named
+    channels nobody could tell apart. When that happens, both get the date.
+    """
+    emoji = "🏈" if game.get("sport") == "football" else "🏀"
+    vs_at = "vs" if game.get("home") else "at"
+    opponent = re.sub(r"[^a-z0-9]+", "-", game.get("opponent", "").lower()).strip("-")
+    base = f"{emoji}-byu-{vs_at}-{opponent}"
+    if week_games and sum(1 for g in week_games if _gameday_channel_name(g) == base) > 1:
+        base += f"-{datetime.date.fromisoformat(game['date']).strftime('%b-%-d').lower()}"
+    return base[:100]
+
+
+def _gameday_overwrites(guild: discord.Guild) -> tuple[dict, list[int]]:
+    """Members-only: @everyone can't see it, every paid/verified/legacy tier can.
+
+    Returns the overwrites plus any configured role IDs missing from the guild,
+    so a renamed or deleted role surfaces in the admin log instead of silently
+    locking that tier out.
+    """
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, manage_channels=True,
+            manage_messages=True, read_message_history=True, attach_files=True,
+        ),
+    }
+    missing = []
+    for role_id in GAMEDAY_ACCESS_ROLE_IDS:
+        role = guild.get_role(role_id)
+        if not role:
+            missing.append(role_id)
+            continue
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True,
+            add_reactions=True, embed_links=True, attach_files=True,
+            use_application_commands=True,
+        )
+    return overwrites, missing
+
+
+def _gameday_opener(game: dict) -> str:
+    vs_at = "vs" if game.get("home") else "at"
+    ping_role_id = int(ONBOARDING.get("ping_roles", {}).get("game_thread", 0) or 0)
+    ping = f"<@&{ping_role_id}> " if ping_role_id else ""
+    details = []
+    if game.get("time"):
+        details.append(f"🕐 Kickoff: **{game['time']}**")
+    if game.get("tv"):
+        details.append(f"📺 Watch on **{game['tv']}**")
+    game_date = datetime.date.fromisoformat(game["date"])
+    return (
+        f"{ping}**Game week is here.** BYU {vs_at} **{game['opponent']}** — "
+        f"{game_date.strftime('%A, %B %-d')} 🎉\n"
+        + ("\n".join(details) + "\n" if details else "")
+        + f"\nThis channel is open all week and closes Sunday night. "
+        f"Predictions, film takes, tailgate plans — all of it goes here. Go Cougs!"
+    )
+
+
+async def open_gameday_channel(game: dict) -> discord.TextChannel | None:
+    """Create this game's channel. Safe to call twice — the DB row short-circuits."""
+    guild = get_guild()
+    if not guild:
+        log.error("Game-week open skipped — guild not in cache.")
+        return None
+
+    week_games = _games_for_week_of(_game_week_monday(datetime.date.fromisoformat(game["date"])))
+    name = _gameday_channel_name(game, week_games)
+    existing = db.gameday_channel_open(game["date"], game.get("opponent", ""))
+    if existing:
+        log.info(f"Game-week channel already open for {game.get('opponent')} ({existing}).")
+        return guild.get_channel(int(existing))
+
+    category = guild.get_channel(GAMEDAY_CATEGORY_IDS.get(game.get("sport"), 0))
+    overwrites, missing = _gameday_overwrites(guild)
+    close_on = _game_week_sunday(datetime.date.fromisoformat(game["date"])).isoformat()
+
+    if GAMEDAY_DRY_RUN:
+        await post_admin_log(
+            f"🧪 **Game-week DRY RUN — would open** `#{name}`\n"
+            f"• Category: **{category.name if category else '⚠️ none — would land at the top of the server'}**\n"
+            f"• Visible to: {len(overwrites) - 2} role(s)"
+            + (f" ⚠️ missing role IDs: {missing}" if missing else "")
+            + f"\n• Would delete: **{close_on} 23:59 MT**"
+        )
+        return None
+
+    try:
+        channel = await guild.create_text_channel(
+            name=name,
+            category=category,
+            overwrites=overwrites,
+            topic=f"BYU {'vs' if game.get('home') else 'at'} {game.get('opponent')} — "
+                  f"game week. This channel is deleted Sunday {close_on} at 11:59pm MT.",
+            reason="CougConnect game-week channel",
+        )
+    except discord.Forbidden:
+        await post_admin_log(
+            f"❌ **Game-week channel `#{name}` failed — the bot lacks **Manage Channels**.** "
+            "Server Settings → Roles → Membership Bot - 2026 → enable Manage Channels."
+        )
+        return None
+    except Exception as e:
+        log.error(f"Game-week channel create failed for {name}: {e}")
+        await post_admin_log(f"❌ Game-week channel `#{name}` failed to open: `{e}`")
+        return None
+
+    db.record_gameday_channel(str(channel.id), game["date"], game.get("opponent", ""),
+                              game.get("sport", ""), close_on)
+    try:
+        msg = await channel.send(
+            _gameday_opener(game),
+            allowed_mentions=discord.AllowedMentions(roles=True, everyone=False, users=False),
+        )
+        await msg.pin(reason="Game-week opener")
+    except Exception as e:
+        log.error(f"Game-week opener failed in {name}: {e}")
+
+    log.info(f"Game-week channel opened: #{name} ({channel.id}), closes {close_on}")
+    await post_admin_log(
+        f"🏈 **Game-week channel opened** — {channel.mention} "
+        f"(BYU {'vs' if game.get('home') else 'at'} {game.get('opponent')}), "
+        f"deletes **{close_on} 11:59pm MT**."
+        + (f"\n⚠️ Configured role IDs not found in the guild: `{missing}`" if missing else "")
+    )
+    return channel
+
+
+async def _gameday_transcript(channel: discord.TextChannel) -> tuple[str, int]:
+    """Whole channel history, oldest first, as plain text. Deletion is permanent,
+    so this runs before it and a failure here aborts the delete."""
+    lines = [
+        f"# {channel.name}",
+        f"# {channel.topic or ''}",
+        f"# archived {dt.now(MOUNTAIN).strftime('%Y-%m-%d %H:%M %Z')}",
+        "",
+    ]
+    count = 0
+    async for m in channel.history(limit=None, oldest_first=True):
+        stamp = m.created_at.astimezone(MOUNTAIN).strftime("%m/%d %H:%M")
+        body = m.clean_content or ""
+        for a in m.attachments:
+            body += f"\n    [attachment] {a.filename} — {a.url}"
+        for e in m.embeds:
+            if e.title or e.description:
+                body += f"\n    [embed] {e.title or ''} {(e.description or '')[:200]}"
+        lines.append(f"[{stamp}] {m.author.display_name}: {body}".rstrip())
+        count += 1
+    return "\n".join(lines), count
+
+
+async def close_gameday_channel(row: dict) -> bool:
+    """Archive the transcript to the admin log, then delete the channel.
+
+    The delete is irreversible, so it only ever runs on a channel this bot
+    recorded in gameday_channels, and only after the transcript upload has
+    succeeded — no transcript, no delete.
+    """
+    guild = get_guild()
+    channel = guild.get_channel(int(row["channel_id"])) if guild else None
+    label = f"BYU–{row['opponent']}"  # row has no home flag; stay neutral
+
+    if not channel:
+        # Deleted by hand already — stop tracking it rather than retrying nightly.
+        db.mark_gameday_channel_closed(row["channel_id"])
+        log.info(f"Game-week channel {row['channel_id']} ({label}) already gone; marked closed.")
+        return True
+
+    if GAMEDAY_DRY_RUN:
+        _, count = await _gameday_transcript(channel)
+        await post_admin_log(
+            f"🧪 **Game-week DRY RUN — would archive and delete** {channel.mention} "
+            f"({label}) — **{count}** message(s). Nothing was deleted."
+        )
+        return False
+
+    try:
+        transcript, count = await _gameday_transcript(channel)
+    except Exception as e:
+        log.error(f"Game-week transcript failed for {channel.name}: {e}")
+        await post_admin_log(
+            f"⚠️ **{channel.mention} NOT deleted** — couldn't read its history (`{e}`). "
+            "The channel is left up so nothing is lost; retrying tomorrow night."
+        )
+        return False
+
+    admin = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if not admin:
+        await post_admin_log(f"⚠️ {channel.mention} NOT deleted — admin log channel unavailable.")
+        return False
+    try:
+        await admin.send(
+            f"🗄️ **Game-week archive — {label}** (`#{channel.name}`, {count} message(s)). "
+            "Deleting the channel now.",
+            file=discord.File(
+                io.BytesIO(transcript.encode("utf-8")),
+                filename=f"{row['game_date']}-{channel.name}.txt",
+            ),
+        )
+    except discord.Forbidden:
+        await post_admin_log(
+            f"⚠️ **{channel.mention} NOT deleted** — the bot lacks **Attach Files** in the admin "
+            "log, so the transcript can't be saved. Enable it and the channel closes tomorrow night."
+        )
+        return False
+    except Exception as e:
+        log.error(f"Game-week archive upload failed for {channel.name}: {e}")
+        await post_admin_log(f"⚠️ **{channel.mention} NOT deleted** — archive upload failed: `{e}`")
+        return False
+
+    try:
+        await channel.delete(reason="CougConnect game week over — transcript archived")
+    except discord.Forbidden:
+        await post_admin_log(
+            f"❌ {channel.mention} archived but **not deleted** — the bot lacks **Manage Channels**."
+        )
+        return False
+    except Exception as e:
+        log.error(f"Game-week channel delete failed for {channel.name}: {e}")
+        await post_admin_log(f"❌ {channel.mention} archived but delete failed: `{e}`")
+        return False
+
+    db.mark_gameday_channel_closed(row["channel_id"])
+    log.info(f"Game-week channel deleted: #{channel.name} ({count} messages archived)")
+    await post_admin_log(f"✅ **Game week closed** — `#{channel.name}` deleted, {count} message(s) archived above.")
+    return True
 
 
 async def send_report_email(subject: str, body_text: str, attachment_path: str | None = None, attachment_name: str | None = None) -> bool:
@@ -978,8 +1269,8 @@ def _discord_tips_embed() -> discord.Embed:
             f"**Only @mentions**. The pings you pick in [Channels & Roles]({ping_roles_link()}) still come through.\n\n"
             "**Hide what you never open** — right-click the server → **Hide Muted Channels**. "
             "Click a category name to collapse it.\n\n"
-            "**Game threads** — once you post in one, it notifies you until the game ends. "
-            "Open the thread → **⋯** → **Leave Thread** to stop.\n\n"
+            "**Game-week channels** — a channel opens Monday of every game week and is deleted "
+            "Sunday night. Mute it like any other channel if it gets loud.\n\n"
             "**Someone's a problem** — right-click their name → **Block**; their messages collapse for you. "
             f"Then tell us in {ob_chan_md('support')} — we'd rather know.\n\n"
             "**Too many red badges?** — **Shift+Esc** marks the whole server read."
@@ -996,7 +1287,7 @@ def _welcome_dm_parts(tier: str, apartment_slug: str | None = None) -> tuple[str
     """
     tier_keys = ONBOARDING.get("tier_channels", {}).get(tier, [])
     blurbs = {
-        "general": "the daily conversation — game threads open here on game day",
+        "general": "the daily conversation",
         "news": "every BYU story, auto-posted as it breaks",
         "player_reports": "what you subscribed for",
         "player_ama": "ask the players directly during AMAs",
@@ -1023,7 +1314,8 @@ def _welcome_dm_parts(tier: str, apartment_slug: str | None = None) -> tuple[str
     )
     start.add_field(
         name="🏈 Game days & Pick'em",
-        value=f"The game thread opens in {ob_chan_md('general')} · Pick'em runs in {ob_chan_md('pickem')}.",
+        value=f"A **BYU vs [opponent]** channel opens Monday of every game week and closes Sunday night · "
+              f"Pick'em runs in {ob_chan_md('pickem')}.",
         inline=False,
     )
     start.add_field(
@@ -1050,7 +1342,8 @@ def _checkin_dm_text(days: int, tier: str) -> str:
         return (
             "👋 **One week in — here's how to get the most out of CougConnect:**\n"
             f"🔔 Pick your pings in [Channels & Roles]({ping_roles_link()}) — VC & AMA · Pick'em · Game Thread.\n"
-            f"🏈 Game days: the game thread opens in {ob_chan_md('general')} — Pick'em is in {ob_chan_md('pickem')}.\n"
+            f"🏈 Game weeks: a **BYU vs [opponent]** channel opens every Monday there's a game and closes "
+            f"Sunday night — Pick'em is in {ob_chan_md('pickem')}.\n"
             f"📰 {ob_chan_md('news')} pulls every BYU story into one feed; voice-chat recaps land on the site.\n"
             f"▶️ The daily podcast is on YouTube — [subscribe]({ob_url('youtube')}) so episodes hit your feed.\n"
             f"🛍️ Gear: player tees (Kyler Kasper, Royal Nights, more) in [the shop]({ob_url('shop')})."
@@ -2240,6 +2533,88 @@ async def flag_stats(interaction: discord.Interaction):
         ]
         embed.add_field(name="By Author", value="\n".join(lines)[:1024], inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="gameday-status", description="Show open game-week channels and what's scheduled next")
+@app_commands.default_permissions(administrator=True)
+async def gameday_status(interaction: discord.Interaction):
+    today = dt.now(MOUNTAIN).date()
+    embed = discord.Embed(title="🏈 Game-week channels", color=discord.Color.blue())
+    state = "🟢 on" if GAMEDAY_CHANNELS else "🔴 off (GAMEDAY_CHANNELS)"
+    if GAMEDAY_CHANNELS and GAMEDAY_DRY_RUN:
+        state += " · 🧪 dry run"
+    embed.add_field(name="Status", value=state, inline=False)
+
+    open_rows = db.get_open_gameday_channels()
+    embed.add_field(
+        name="Open now",
+        value="\n".join(
+            f"<#{r['channel_id']}> — {r['opponent']} · deletes **{r['close_on']} 11:59pm MT**"
+            for r in open_rows
+        ) or "None.",
+        inline=False,
+    )
+
+    upcoming = []
+    for game in _load_json(SCHEDULE_PATH):
+        try:
+            game_date = datetime.date.fromisoformat(game["date"])
+        except (KeyError, ValueError):
+            continue
+        if game_date < today:
+            continue
+        monday = _game_week_monday(game_date)
+        when = "opens **today**" if monday == today else (
+            f"opened {monday}" if monday < today else f"opens {monday}")
+        upcoming.append(f"`{_gameday_channel_name(game)}` — {when}")
+    embed.add_field(name="Next up", value="\n".join(upcoming[:6]) or "Season's over.", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="gameday-open", description="Open this week's game channel now (catch-up if Monday was missed)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(game_date="Game date as YYYY-MM-DD. Defaults to this week's game.")
+async def gameday_open(interaction: discord.Interaction, game_date: str | None = None):
+    await interaction.response.defer(ephemeral=True)
+    today = dt.now(MOUNTAIN).date()
+    if game_date:
+        try:
+            target = datetime.date.fromisoformat(game_date)
+        except ValueError:
+            await interaction.followup.send(f"`{game_date}` isn't a YYYY-MM-DD date.", ephemeral=True)
+            return
+        games = [g for g in _load_json(SCHEDULE_PATH) if g.get("date") == target.isoformat()]
+    else:
+        games = _games_for_week_of(_game_week_monday(today))
+
+    if not games:
+        await interaction.followup.send(
+            "No game in `schedule.json` for that week. `/gameday-status` shows what's scheduled.",
+            ephemeral=True)
+        return
+
+    opened = []
+    for game in games:
+        channel = await open_gameday_channel(game)
+        opened.append(channel.mention if channel else f"`{_gameday_channel_name(game, games)}` — see the admin log")
+    await interaction.followup.send("Opened: " + ", ".join(opened), ephemeral=True)
+
+
+@bot.tree.command(name="gameday-close", description="Archive and delete an open game-week channel now")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The game-week channel to archive and delete")
+async def gameday_close(interaction: discord.Interaction, channel: discord.TextChannel):
+    await interaction.response.defer(ephemeral=True)
+    row = next((r for r in db.get_open_gameday_channels() if r["channel_id"] == str(channel.id)), None)
+    if not row:
+        await interaction.followup.send(
+            f"{channel.mention} isn't a game-week channel this bot opened, so it won't be touched. "
+            "Delete it by hand if that's what you want.", ephemeral=True)
+        return
+    ok = await close_gameday_channel(row)
+    await interaction.followup.send(
+        "Archived and deleted — transcript is in the admin log." if ok
+        else "Not deleted. The admin log says why.", ephemeral=True)
 
 
 @bot.tree.command(name="tier-history", description="Show recent tier changes")
