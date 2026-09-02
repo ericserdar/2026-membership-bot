@@ -968,6 +968,61 @@ def _gameday_opener(game: dict) -> str:
     )
 
 
+async def announce_gameday_channel(channel: discord.TextChannel, game: dict):
+    """Point members at the new channel from #cougconnect-announcements.
+
+    Sent silent (SUPPRESS_NOTIFICATIONS): announcements reaches the whole
+    membership, and a channel opening is not worth a push to all of them. The
+    opener inside the game channel still mentions the Game Thread Pings role,
+    so the people who opted into that notification still get it.
+
+    Never fatal — a failure here leaves the game channel open and working.
+    """
+    ann_id = ob_channel_id("announcements")
+    if not ann_id:
+        return
+    ann = bot.get_channel(ann_id)
+    if not ann:
+        log.error("Game-week announcement skipped — announcements channel not in cache.")
+        return
+
+    vs_at = "vs" if game.get("home") else "at"
+    emoji = "🏈" if game.get("sport") == "football" else "🏀"
+    game_date = datetime.date.fromisoformat(game["date"])
+    details = []
+    if game.get("time"):
+        details.append(f"🕐 **{game['time']}**")
+    if game.get("tv"):
+        details.append(f"📺 **{game['tv']}**")
+
+    embed = discord.Embed(
+        title=f"{emoji} Game week — BYU {vs_at} {game['opponent']}",
+        colour=discord.Colour(0x1A3EF0),
+        description=(
+            f"{game_date.strftime('%A, %B %-d')}"
+            + ("  ·  " + "  ·  ".join(details) if details else "")
+            + f"\n\n{channel.mention} is open all week — predictions, film takes, "
+              "tailgate plans. It closes Sunday night."
+        ),
+    )
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="Open the channel", style=discord.ButtonStyle.link,
+        url=f"https://discord.com/channels/{GUILD_ID}/{channel.id}", emoji=emoji,
+    ))
+    try:
+        await ann.send(embed=embed, view=view, silent=True)
+    except discord.Forbidden:
+        await post_admin_log(
+            f"⚠️ Game-week announcement skipped — the bot can't post in <#{ann_id}>. "
+            "Give **Membership Bot - 2026** a **View Channel** overwrite there "
+            f"({channel.mention} itself opened fine)."
+        )
+    except Exception as e:
+        log.error(f"Game-week announcement failed: {e}")
+        await post_admin_log(f"⚠️ Game-week announcement failed: `{e}` ({channel.mention} opened fine).")
+
+
 async def open_gameday_channel(game: dict) -> discord.TextChannel | None:
     """Create this game's channel. Safe to call twice — the DB row short-circuits."""
     guild = get_guild()
@@ -993,6 +1048,7 @@ async def open_gameday_channel(game: dict) -> discord.TextChannel | None:
             f"• Visible to: {len(overwrites) - 2} role(s)"
             + (f" ⚠️ missing role IDs: {missing}" if missing else "")
             + f"\n• Would delete: **{close_on} 23:59 MT**"
+            + f"\n• Would announce it silently in <#{ob_channel_id('announcements')}>"
         )
         return None
 
@@ -1026,6 +1082,8 @@ async def open_gameday_channel(game: dict) -> discord.TextChannel | None:
         await msg.pin(reason="Game-week opener")
     except Exception as e:
         log.error(f"Game-week opener failed in {name}: {e}")
+
+    await announce_gameday_channel(channel, game)
 
     log.info(f"Game-week channel opened: #{name} ({channel.id}), closes {close_on}")
     await post_admin_log(
