@@ -3233,6 +3233,10 @@ async def handle_connect_callback(request: web.Request) -> web.Response:
 INACTIVE_EVENTS = {
     "subscription-expired",
     "member-account-expired",
+    # A gifted membership (MemberPress Gifting) is a subscription-less free
+    # transaction, so when it runs out MemberPress fires this instead of
+    # subscription-expired. Same verify-before-demote path as the others.
+    "non-recurring-transaction-expired",
     # NOTE: subscription-stopped and subscription-cancelled are NOT here.
     # Those fire when auto-renewal is cancelled but access continues until the
     # paid period ends. We re-fetch from MemberPress to get the real current tier
@@ -3286,6 +3290,14 @@ async def process_webhook_event(event: str, mp_member_id: int, record: dict):
             await assign_role(discord_id, current_tier)
             await assign_apartment_role(discord_id, mp.get_apartment_slug(member_obj) if member_obj else None)
             log.info(f"Webhook {event} for discord_id={discord_id}: still {current_tier} in MemberPress — not demoting")
+            return
+        if record["tier"] == "unsubscribed":
+            # Nothing to demote and no "your membership expired" DM for a
+            # membership they did not have. Happens when a lapsed, still-linked
+            # member buys someone a gift: MemberPress Gifting records the buyer's
+            # payment with expires_at = created_at, and that row hits the expiry
+            # sweep 12 hours later.
+            log.info(f"Webhook {event} for discord_id={discord_id}: already unsubscribed — no-op")
             return
         db.log_tier_change(record["discord_id"], record["mp_email"], record["tier"], "unsubscribed", reason=f"webhook:{event}")
         db.upsert_member(record["discord_id"], mp_member_id, record["mp_email"], "unsubscribed")
