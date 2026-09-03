@@ -959,12 +959,23 @@ def _gameday_opener(game: dict) -> str:
     if game.get("tv"):
         details.append(f"📺 Watch on **{game['tv']}**")
     game_date = datetime.date.fromisoformat(game["date"])
+    # The rules reminder is grounded in the two that actually break during a
+    # game — personal attacks (rule 1) and profanity (rule 3) — and says why,
+    # because "players and their families read this" lands harder than "be nice".
+    # The outside invite is wrapped in <> so Discord doesn't render an invite
+    # card for a server we aren't affiliated with.
     return (
         f"{ping}**Game week is here.** BYU {vs_at} **{game['opponent']}** — "
         f"{game_date.strftime('%A, %B %-d')} 🎉\n"
         + ("\n".join(details) + "\n" if details else "")
         + f"\nThis channel is open all week and closes Sunday night. "
-        f"Predictions, film takes, tailgate plans — all of it goes here. Go Cougs!"
+        f"Predictions, film takes, tailgate plans — all of it goes here.\n\n"
+        f"**Games get heated. The rules don't change.** Players and their families "
+        f"read this server, so no shots at them or at each other, and keep the "
+        f"language clean — the full list is in {ob_channel('rules')}.\n"
+        f"Need to scream into the void? That's what Twitter is for, or the "
+        f"unaffiliated gameday chat: <https://discord.gg/BCBrjx24W8>\n\n"
+        f"Go Cougs!"
     )
 
 
@@ -1004,6 +1015,12 @@ async def announce_gameday_channel(channel: discord.TextChannel, game: dict):
             + f"\n\n{channel.mention} is open all week — predictions, film takes, "
               "tailgate plans. It closes Sunday night."
         ),
+    )
+    embed.add_field(
+        name="Before you dive in",
+        value=("Games get heated; the rules don't. Players and their families read this "
+               f"server — the full list is in {ob_channel('rules')}."),
+        inline=False,
     )
     view = discord.ui.View(timeout=None)
     view.add_item(discord.ui.Button(
