@@ -78,6 +78,12 @@ def init_db():
                 total         INTEGER
             )
         """)
+        # Royal arrived after launch, so the live table needs the column added.
+        # Existing rows keep NULL, which reads as 0 — they predate the tier.
+        try:
+            conn.execute("ALTER TABLE stats_snapshots ADD COLUMN royal INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS upgrade_nudges (
                 discord_id  TEXT PRIMARY KEY,
@@ -517,9 +523,10 @@ def save_stats_snapshot(stats: dict):
     today = datetime.utcnow().strftime("%Y-%m-%d")
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            INSERT OR REPLACE INTO stats_snapshots (snapshot_date, gold, silver, insider, unsubscribed, total)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (today, stats["gold"], stats["silver"], stats["insider"], stats["unsubscribed"], stats["total"]))
+            INSERT OR REPLACE INTO stats_snapshots (snapshot_date, gold, silver, royal, insider, unsubscribed, total)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (today, stats["gold"], stats["silver"], stats["royal"], stats["insider"],
+              stats["unsubscribed"], stats["total"]))
         conn.commit()
 
 
@@ -528,13 +535,13 @@ def get_previous_snapshot() -> dict | None:
     today = datetime.utcnow().strftime("%Y-%m-%d")
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT snapshot_date, gold, silver, insider, unsubscribed, total "
+            "SELECT snapshot_date, gold, silver, COALESCE(royal, 0), insider, unsubscribed, total "
             "FROM stats_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1",
             (today,),
         ).fetchone()
     if not row:
         return None
-    return dict(zip(["snapshot_date", "gold", "silver", "insider", "unsubscribed", "total"], row))
+    return dict(zip(["snapshot_date", "gold", "silver", "royal", "insider", "unsubscribed", "total"], row))
 
 
 # ── Churn analysis ────────────────────────────────────────────────────────────
@@ -552,7 +559,7 @@ def get_churn_data(months: int = 6) -> dict:
         """, (cutoff,)).fetchall()
         by_tier = conn.execute("""
             SELECT old_tier, COUNT(*) FROM tier_changes
-            WHERE new_tier = 'unsubscribed' AND changed_at >= ? AND old_tier IN ('gold', 'silver', 'insider')
+            WHERE new_tier = 'unsubscribed' AND changed_at >= ? AND old_tier IN ('gold', 'silver', 'royal', 'insider')
             GROUP BY old_tier
         """, (cutoff,)).fetchall()
         lengths = conn.execute("""
@@ -589,6 +596,7 @@ def get_stats() -> dict:
         "total": total,
         "gold": counts.get("gold", 0),
         "silver": counts.get("silver", 0),
+        "royal": counts.get("royal", 0),
         "insider": counts.get("insider", 0),
         "unsubscribed": counts.get("unsubscribed", 0),
     }

@@ -80,9 +80,16 @@ REPORT_EMAIL_TO = os.getenv("REPORT_EMAIL_TO", "eric@serdarconsulting.com")
 ROLE_IDS = {
     "gold":         int(os.getenv("DISCORD_ROLE_GOLD_ID", "0")),
     "silver":       int(os.getenv("DISCORD_ROLE_SILVER_ID", "0")),
+    "royal":        int(os.getenv("DISCORD_ROLE_ROYAL_ID", "0")),
     "insider":      int(os.getenv("DISCORD_ROLE_INSIDER_ID", "0")),
     "unsubscribed": int(os.getenv("DISCORD_ROLE_UNSUBSCRIBED_ID", "0")),
 }
+
+# Every paying tier. Royal ($20/mo) carries no perks above Insider but is its own
+# role and label. Written once here rather than inline so a future tier can never
+# be half-added — a missed call site would silently cost members their profile
+# strip, welcome DM or milestone credit.
+PAID_TIERS = ("gold", "silver", "royal", "insider")
 
 GENERAL_CHANNEL_ID = int(os.getenv("DISCORD_GENERAL_CHANNEL_ID", "1050165331894751314"))
 
@@ -124,14 +131,17 @@ GAMEDAY_CATEGORY_IDS = {
 
 # Who can see a game-week channel. @everyone is denied; these are granted.
 # Names are documentation — Discord enforces the IDs.
-GAMEDAY_ACCESS_ROLE_IDS = [int(x) for x in os.getenv(
-    "DISCORD_GAMEDAY_ROLE_IDS",
-    "1082893434827845643,"   # Gold Subscriber
-    "1082893184402722876,"   # Silver Subscriber
-    "1359380692202553434,"   # Cougar Insider
-    "1454954937610932325,"   # Verified Insider
-    "1359536444451983400",   # Legacy Cougar Insider
-).split(",") if x.strip()]
+_GAMEDAY_ROLE_ENV = os.getenv("DISCORD_GAMEDAY_ROLE_IDS", "").strip()
+if _GAMEDAY_ROLE_ENV:
+    GAMEDAY_ACCESS_ROLE_IDS = [int(x) for x in _GAMEDAY_ROLE_ENV.split(",") if x.strip()]
+else:
+    # Every configured paying tier, plus two legacy roles that predate the bot and
+    # are never granted or stripped by it. Deriving the tier half from ROLE_IDS
+    # means a new tier gets game-week access the moment its env var is set.
+    GAMEDAY_ACCESS_ROLE_IDS = [ROLE_IDS[t] for t in PAID_TIERS if ROLE_IDS.get(t)] + [
+        1454954937610932325,   # Verified Insider
+        1359536444451983400,   # Legacy Cougar Insider
+    ]
 
 # Mods/admins react with this emoji to flag a message: it's logged to the mod
 # log channel + DB, then deleted. Only members with Manage Messages can trigger it.
@@ -483,7 +493,7 @@ class CougConnectBot(commands.Bot):
     @tasks.loop(time=datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc))  # 9am MST (UTC-7)
     async def expiry_notice_task(self):
         """DM members whose cancelled subscription ends within 3 days (once per expiry date)."""
-        members = [m for m in db.get_all_members() if m["tier"] in ("gold", "silver", "insider")]
+        members = [m for m in db.get_all_members() if m["tier"] in PAID_TIERS]
         for record in members:
             try:
                 mp_data = await mp.get_member_by_id(record["mp_member_id"])
@@ -634,14 +644,14 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=17, minute=30, tzinfo=datetime.timezone.utc))  # ~10:30am MT
     async def upgrade_nudge_task(self):
-        """One-time DM to Insiders who've been members 5+ months about upgrading."""
+        """One-time DM to Insider/Royal members of 5+ months about upgrading."""
         cutoff = dt.now(timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=UPGRADE_NUDGE_DAYS)
         sent = 0
         for record in db.get_all_members():
             if sent >= UPGRADE_NUDGE_DAILY_CAP:
                 log.info(f"Upgrade nudge daily cap ({UPGRADE_NUDGE_DAILY_CAP}) reached — resuming tomorrow.")
                 break
-            if record["tier"] != "insider" or not record["linked_at"]:
+            if record["tier"] not in ("insider", "royal") or not record["linked_at"]:
                 continue
             if db.upgrade_nudge_sent(record["discord_id"]):
                 continue
@@ -737,6 +747,7 @@ class CougConnectBot(commands.Bot):
         lines = [
             "**📈 CougConnect Weekly Digest**",
             f"🥇 Gold: **{stats['gold']}**{delta('gold')}  |  🥈 Silver: **{stats['silver']}**{delta('silver')}  |  "
+            f"👑 Royal: **{stats['royal']}**{delta('royal')}  |  "
             f"🔵 Insider: **{stats['insider']}**{delta('insider')}",
             f"Total verified: **{stats['total']}**{delta('total')}  |  Unsubscribed: {stats['unsubscribed']}{delta('unsubscribed')}",
             f"This week: 🔗 {len(new_links)} new verification(s), ❌ {len(cancels)} cancellation(s)",
@@ -825,7 +836,7 @@ class CougConnectBot(commands.Bot):
             for record in db.get_members_linked_days_ago(days):
                 if sent >= ONBOARDING_DM_DAILY_CAP:
                     break
-                if record["tier"] not in ("gold", "silver", "insider"):
+                if record["tier"] not in PAID_TIERS:
                     continue
                 if db.onboarding_step_sent(record["discord_id"], step):
                     continue
@@ -1322,6 +1333,10 @@ def _welcome_dm_text(tier: str, apartment_slug: str | None = None) -> str:
                 "voice chats, plus your custom jersey and $55 in store credit every year you stay.",
         "silver": "As a **Silver** member you get the player reports, the Silver channels and community events, the swag "
                   "box, and $25 in store credit every year you stay.",
+        # Royal is Insider's perks at a higher price — members choose it to give
+        # more, so the copy thanks them for that rather than listing extras.
+        "royal": "As a **Royal** member you get the player reports and the community channels — everything the crew "
+                 "talks about all week. Thank you for choosing to back the program at a higher level.",
         "insider": "As an **Insider** you get the player reports and the community channels — everything the crew talks about all week.",
     }
     apartment_line = ""
@@ -1483,7 +1498,7 @@ async def _mailchimp_sync_member(mp_member_id: int, event: str):
             return
         tier = mp.resolve_tier(mp.active_ids_from_member_object(member))
         tags = ["Customer"]
-        if tier in ("gold", "silver", "insider"):
+        if tier in PAID_TIERS:
             tags.append(f"tier:{tier}")
             # One umbrella trigger for the Mailchimp journeys: the plan caps a journey at
             # four points, so the drip is three short journeys that all start here.
@@ -1671,7 +1686,7 @@ async def _tier_sync_records(force_adopt: bool = False) -> tuple[list[dict], int
             "discord_id": discord_id,
             "mp_member_id": 0,
             "mp_email": email,
-            "tier": tier if tier in ("gold", "silver", "insider") else "none",
+            "tier": tier if tier in PAID_TIERS else "none",
         })
         adopted += 1
 
@@ -1812,7 +1827,7 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
                 db.upsert_member(record["discord_id"], mp_id, record["mp_email"], new_tier)
                 # Keep apartment role in sync even when tier is unchanged (member may
                 # have set/changed their housing on the website since last sync).
-                if new_tier in ("gold", "silver", "insider"):
+                if new_tier in PAID_TIERS:
                     await assign_apartment_role(int(record["discord_id"]), apartment_slug)
         except Exception as e:
             log.error(f"{reason} error for discord_id={record['discord_id']}: {e}")
@@ -1823,7 +1838,8 @@ async def sync_members(members: list, reason: str, delay_between: float) -> int:
 
 
 def tier_label(tier: str) -> str:
-    return {"gold": "Gold", "silver": "Silver", "insider": "Insider", "unsubscribed": "Unsubscribed"}.get(tier, tier.title())
+    return {"gold": "Gold", "silver": "Silver", "royal": "Royal", "insider": "Insider",
+            "unsubscribed": "Unsubscribed"}.get(tier, tier.title())
 
 
 async def send_welcome_dm(discord_id: int, tier: str, apartment_slug: str | None = None, email: str | None = None):
@@ -1858,6 +1874,7 @@ def tier_color(tier: str) -> discord.Color:
     return {
         "gold": discord.Color.gold(),
         "silver": discord.Color.light_grey(),
+        "royal": discord.Color(0x1A3AFF),   # CougConnect brand royal blue
         "insider": discord.Color.blue(),
         "unsubscribed": discord.Color.dark_grey(),
     }.get(tier, discord.Color.default())
@@ -2017,7 +2034,7 @@ async def on_member_join(member: discord.Member):
         return
     db.record_join(str(member.id))
     existing = db.get_member_by_discord(str(member.id))
-    if existing and existing["tier"] in ("gold", "silver", "insider"):
+    if existing and existing["tier"] in PAID_TIERS:
         # A rejoin: restore the role they already earned and skip the tour.
         try:
             await assign_role(member.id, existing["tier"])
@@ -2192,7 +2209,7 @@ async def sync_member(interaction: discord.Interaction, user: discord.Member):
     db.upsert_member(str(user.id), existing["mp_member_id"], existing["mp_email"], tier)
     await assign_role(user.id, tier)
     apartment_slug = mp.get_apartment_slug(member_obj) if member_obj else None
-    if tier in ("gold", "silver", "insider"):
+    if tier in PAID_TIERS:
         await assign_apartment_role(user.id, apartment_slug)
     else:
         await assign_apartment_role(user.id, None)
@@ -2493,7 +2510,7 @@ async def sync_links_to_wp(interaction: discord.Interaction):
     guild = get_guild()
     links = []
     for r in db.get_all_members():
-        if r["tier"] not in ("gold", "silver", "insider") or not r.get("mp_email"):
+        if r["tier"] not in PAID_TIERS or not r.get("mp_email"):
             continue
         m = guild.get_member(int(r["discord_id"])) if guild else None
         links.append({"email": r["mp_email"], "discord_id": str(r["discord_id"]), "username": m.display_name if m else ""})
@@ -2718,6 +2735,7 @@ async def stats(interaction: discord.Interaction):
     embed.add_field(name="Total Verified", value=str(s["total"]), inline=False)
     embed.add_field(name="🥇 Gold", value=str(s["gold"]), inline=True)
     embed.add_field(name="🥈 Silver", value=str(s["silver"]), inline=True)
+    embed.add_field(name="👑 Royal", value=str(s["royal"]), inline=True)
     embed.add_field(name="🔵 Insider", value=str(s["insider"]), inline=True)
     embed.add_field(name="❌ Unsubscribed", value=str(s["unsubscribed"]), inline=True)
     embed.set_footer(text=f"As of {dt.now(timezone.utc).strftime('%m/%d/%Y %H:%M')} UTC")
@@ -3021,7 +3039,8 @@ def _display_name(discord_id: int) -> str:
 def _success_page(tier: str, in_server: bool = True) -> web.Response:
     """Shared 'you're verified' page for the verify form and the OAuth connect."""
     tier_display = tier_label(tier)
-    home_key = {"gold": "gold_lounge", "silver": "silver", "insider": "insider_info"}.get(tier, "general")
+    home_key = {"gold": "gold_lounge", "silver": "silver", "royal": "insider_info",
+                "insider": "insider_info"}.get(tier, "general")
     if in_server:
         note = "We also sent you a Discord DM with a channel guide."
         first = f'<a href="{ob_channel_link(home_key)}" {BTN_PRIMARY}>Open your channels</a>'

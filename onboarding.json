@@ -29,6 +29,7 @@
   "tier_channels": {
     "gold":    ["gold_lounge", "silver", "insider_info", "player_reports", "player_ama", "vc_recaps"],
     "silver":  ["silver", "insider_info", "player_reports", "player_ama", "vc_recaps"],
+    "royal":   ["insider_info", "player_reports", "player_ama", "vc_recaps"],
     "insider": ["insider_info", "player_reports", "player_ama", "vc_recaps"]
   },
   "ping_roles": {

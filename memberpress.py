@@ -19,15 +19,17 @@ APARTMENT_FIELD = os.getenv("MEMBERPRESS_APARTMENT_FIELD", "mepr_mepr_byu_apartm
 # Tier ID sets — populated from env at startup
 _GOLD_IDS: set[int] = set()
 _SILVER_IDS: set[int] = set()
+_ROYAL_IDS: set[int] = set()
 _INSIDER_IDS: set[int] = set()
 
 
 def load_tier_ids():
-    global _GOLD_IDS, _SILVER_IDS, _INSIDER_IDS
+    global _GOLD_IDS, _SILVER_IDS, _ROYAL_IDS, _INSIDER_IDS
     def parse(env_key):
         return {int(x.strip()) for x in os.getenv(env_key, "").split(",") if x.strip().isdigit()}
     _GOLD_IDS = parse("MEMBERPRESS_TIER_GOLD_IDS")
     _SILVER_IDS = parse("MEMBERPRESS_TIER_SILVER_IDS")
+    _ROYAL_IDS = parse("MEMBERPRESS_TIER_ROYAL_IDS")
     _INSIDER_IDS = parse("MEMBERPRESS_TIER_INSIDER_IDS")
 
 
@@ -42,6 +44,10 @@ def resolve_tier(membership_ids: list[int]) -> str:
         return "gold"
     if ids & _SILVER_IDS:
         return "silver"
+    # Royal ($20/mo) carries no perks above Insider, but it is its own identity
+    # and its own Discord role, so it resolves ahead of insider.
+    if ids & _ROYAL_IDS:
+        return "royal"
     if ids & _INSIDER_IDS:
         return "insider"
     return "unsubscribed"
