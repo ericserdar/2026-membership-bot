@@ -79,3 +79,25 @@ async def push_links(links: list[dict]) -> dict:
             totals["failed"] += len(chunk)
             log.warning(f"WP bulk link write-back chunk failed: {e}")
     return totals
+
+
+async def silver_access(discord_id: int | str, check: bool = False) -> tuple[int, dict]:
+    """Look up or spend a member's Silver channel month.
+
+    WordPress stays the source of truth for what they hold and how long a
+    window runs; Discord is only where the button happens to be. Returns the
+    raw (status, body) so the caller can tell "nothing to spend" (409) apart
+    from "not linked" (404) and from the endpoint being unreachable (0).
+    """
+    if not configured():
+        return 0, {}
+
+    payload = {"discord_id": str(discord_id)}
+    if check:
+        payload["check"] = 1
+
+    try:
+        return await _post("/silver-access", payload)
+    except Exception as e:
+        log.error(f"silver-access call failed for {discord_id}: {e}")
+        return 0, {}

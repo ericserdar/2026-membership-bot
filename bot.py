@@ -2294,6 +2294,101 @@ async def sync_member(interaction: discord.Interaction, user: discord.Member):
     )
 
 
+@bot.tree.command(name="silver-access", description="Start your earned month in the Silver channel, or see what you have saved")
+async def silver_access_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    status, body = await wp_link.silver_access(interaction.user.id, check=True)
+
+    if status == 0:
+        await interaction.followup.send("⚠️ Couldn't reach the site just now. Nothing changed — try again in a minute.", ephemeral=True)
+        return
+    if status == 404:
+        await interaction.followup.send(
+            "You don't have a CougConnect account linked to Discord yet. Link it from your account page and this will work.",
+            ephemeral=True,
+        )
+        return
+
+    passes = int(body.get("passes") or 0)
+    until = str(body.get("until") or "")
+    days = int(body.get("days") or 30)
+
+    if until:
+        extra = f" You have **{passes}** more saved for another time." if passes else ""
+        await interaction.followup.send(f"You're in the Silver channel until **{until}**.{extra}", ephemeral=True)
+        return
+
+    if passes < 1:
+        await interaction.followup.send(
+            "You don't have a Silver channel month saved right now. They're earned at three years with CougConnect.",
+            ephemeral=True,
+        )
+        return
+
+    # Spending it is deliberate — confirm rather than burning it on a mistyped
+    # command, since the whole point is choosing the moment.
+    view = discord.ui.View(timeout=120)
+    button = discord.ui.Button(label=f"Start my {days} days", style=discord.ButtonStyle.primary)
+
+    async def on_click(click: discord.Interaction):
+        if click.user.id != interaction.user.id:
+            await click.response.send_message("That isn't yours to spend.", ephemeral=True)
+            return
+        st, bd = await wp_link.silver_access(click.user.id)
+        if st == 200:
+            await click.response.edit_message(
+                content=f"Done — you're in the Silver channel until **{bd.get('until')}**. "
+                        f"It may take a minute for the channel to appear.",
+                view=None,
+            )
+            try:
+                await bot.sync_silver_access([(str(click.user.id), {"silver_access_until": bd.get("until") or "", "active": True})])
+            except Exception as e:
+                log.error(f"immediate Silver Access role add failed for {click.user.id}: {e}")
+        else:
+            await click.response.edit_message(content=f"⚠️ {bd.get('message') or 'That did not go through. Nothing was used.'}", view=None)
+
+    button.callback = on_click
+    view.add_item(button)
+
+    await interaction.followup.send(
+        f"You have **{passes}** month{'s' if passes != 1 else ''} in the Silver channel saved. "
+        f"It doesn't expire, so there's no rush — start it when there's something worth being in there for.",
+        view=view,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="sync-access", description="Reconcile Silver Access roles against WordPress now, without waiting for the daily pass")
+@app_commands.default_permissions(administrator=True)
+async def sync_access(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    if not SILVER_ACCESS_ROLE_ID:
+        await interaction.followup.send("❌ DISCORD_ROLE_SILVER_ACCESS_ID is not set.", ephemeral=True)
+        return
+
+    tenure = await mp.get_tenure_map()
+    if tenure is None:
+        # None means "could not fetch", never "nobody qualifies" — acting on it
+        # would strip the role from everyone who has it.
+        await interaction.followup.send("⚠️ Couldn't reach the tenure endpoint. **Nothing changed.**", ephemeral=True)
+        return
+
+    targets = _milestone_targets(tenure)
+    await bot.sync_silver_access(targets)
+
+    holders = [m.display_name for m in interaction.guild.members
+               if any(r.id == SILVER_ACCESS_ROLE_ID for r in m.roles)]
+    await interaction.followup.send(
+        f"✅ Reconciled against {len(targets)} linked members. "
+        f"Silver Access is held by **{len(holders)}**"
+        + (": " + ", ".join(holders[:15]) if holders else "."),
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="lookup-email", description="Find which Discord account is linked to an email address")
 @app_commands.describe(email="The CougConnect email to look up")
 @app_commands.default_permissions(manage_roles=True)
