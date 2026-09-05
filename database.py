@@ -78,6 +78,14 @@ def init_db():
                 total         INTEGER
             )
         """)
+        # When this member's paid membership actually began. linked_at is the
+        # Discord verify date and is NOT a membership start — it clusters around
+        # the April 2026 migration for 1,142 members, so it must never be shown
+        # as "member since". Filled from the tenure endpoint on the daily pass.
+        try:
+            conn.execute("ALTER TABLE member_links ADD COLUMN first_paid TEXT")
+        except sqlite3.OperationalError:
+            pass
         # Royal arrived after launch, so the live table needs the column added.
         # Existing rows keep NULL, which reads as 0 — they predate the tier.
         try:
@@ -345,37 +353,37 @@ def upsert_member(discord_id: str, mp_member_id: int, mp_email: str, tier: str):
 def get_member_by_discord(discord_id: str) -> dict | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced "
+            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced, first_paid "
             "FROM member_links WHERE discord_id = ?",
             (discord_id,),
         ).fetchone()
     if not row:
         return None
-    return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row))
+    return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced", "first_paid"], row))
 
 
 def get_member_by_email(email: str) -> dict | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced "
+            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced, first_paid "
             "FROM member_links WHERE LOWER(mp_email) = LOWER(?)",
             (email,),
         ).fetchone()
     if not row:
         return None
-    return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row))
+    return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced", "first_paid"], row))
 
 
 def get_member_by_mp_id(mp_member_id: int) -> dict | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced "
+            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced, first_paid "
             "FROM member_links WHERE mp_member_id = ?",
             (mp_member_id,),
         ).fetchone()
     if not row:
         return None
-    return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row))
+    return dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced", "first_paid"], row))
 
 
 def remove_member(discord_id: str):
@@ -384,13 +392,22 @@ def remove_member(discord_id: str):
         conn.commit()
 
 
+def set_first_paid(discord_id: str, first_paid: str):
+    """Record when this member's paid membership began (ISO date, may be '')."""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE member_links SET first_paid = ? WHERE discord_id = ?",
+            (first_paid[:10] if first_paid else None, str(discord_id)),
+        )
+
+
 def get_all_members() -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced "
+            "SELECT discord_id, mp_member_id, mp_email, tier, linked_at, last_synced, first_paid "
             "FROM member_links"
         ).fetchall()
-    return [dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced"], row)) for row in rows]
+    return [dict(zip(["discord_id", "mp_member_id", "mp_email", "tier", "linked_at", "last_synced", "first_paid"], row)) for row in rows]
 
 
 # ── Unlinked paying members (webhooks from MemberPress accounts with no Discord link) ──

@@ -188,6 +188,14 @@ ONBOARDING_PATH = os.path.join(os.path.dirname(__file__), "onboarding.json")
 
 ONBOARDING_JOIN_DM = _flag("ONBOARDING_JOIN_DM")   # DM the 3 steps when someone joins the guild
 ONBOARDING_DRIP = _flag("ONBOARDING_DRIP")         # day-1/3 unverified nudges + day-7/30 check-ins
+# Appends what a milestone earns to the existing shoutout. Ships off: the
+# reward only reads well once the codes are actually going out. Never a second
+# post and never a DM — the credit email already tells them directly.
+MILESTONE_SHOW_REWARD = _flag("MILESTONE_SHOW_REWARD")
+# Two months in the Silver channel, earned at three years. A separate role
+# rather than the Silver Subscriber one: these members are guests, the channel
+# should be able to tell, and assign_role() must not strip it as a tier role.
+SILVER_ACCESS_ROLE_ID = int(os.getenv("DISCORD_ROLE_SILVER_ACCESS_ID", "0"))
 ONBOARDING_DRY_RUN = _flag("ONBOARDING_DRY_RUN")   # log/admin-log "would DM …" and send nothing
 ONBOARDING_DM_DAILY_CAP = int(os.getenv("ONBOARDING_DM_DAILY_CAP", "50"))
 UNVERIFIED_NUDGE_HOURS = (24, 72)   # hours after joining without verifying → nudge 1, nudge 2
@@ -552,6 +560,58 @@ class CougConnectBot(commands.Bot):
     async def before_winback(self):
         await self.wait_until_ready()
 
+    async def sync_silver_access(self, targets):
+        """Hold the Silver Access role exactly while the window is open.
+
+        Declarative rather than event-driven: WordPress owns the end date and
+        this reconciles to it, so a missed run, a rejoin or a manual change all
+        self-correct on the next pass. Never touches a tier role.
+        """
+        if not SILVER_ACCESS_ROLE_ID:
+            return
+
+        guild = self.get_guild(GUILD_ID)
+        if guild is None:
+            return
+
+        role = guild.get_role(SILVER_ACCESS_ROLE_ID)
+        if role is None:
+            log.warning("Silver Access role %s not found", SILVER_ACCESS_ROLE_ID)
+            return
+
+        today = dt.now(timezone.utc).strftime("%Y-%m-%d")
+        added = removed = 0
+
+        for discord_id, info in targets:
+            until = info.get("silver_access_until") or ""
+            # Only while they are still paying. Discord is a members-only
+            # benefit, so someone who lapses mid-window loses the channel with
+            # everything else rather than keeping a premium room for two more
+            # months. WordPress keeps the end date, so resubscribing inside the
+            # window restores it on the next pass.
+            should_hold = bool(until) and until >= today and bool(info.get("active"))
+
+            member = guild.get_member(int(discord_id))
+            if member is None:
+                continue
+
+            has = role in member.roles
+            if should_hold and not has:
+                try:
+                    await member.add_roles(role, reason="Three-year milestone: Silver channel access")
+                    added += 1
+                except Exception as e:
+                    log.error(f"Silver Access grant failed for {discord_id}: {e}")
+            elif has and not should_hold:
+                try:
+                    await member.remove_roles(role, reason="Silver channel access window ended")
+                    removed += 1
+                except Exception as e:
+                    log.error(f"Silver Access removal failed for {discord_id}: {e}")
+
+        if added or removed:
+            log.info(f"Silver Access: +{added} -{removed}")
+
     @tasks.loop(time=datetime.time(hour=15, minute=0, tzinfo=datetime.timezone.utc))  # ~9am MT
     async def milestone_task(self):
         """Celebrate membership milestones from real paid tenure.
@@ -597,6 +657,17 @@ class CougConnectBot(commands.Bot):
                 f"everyone silently."
             )
 
+        # Keep "member since" current. The tenure map is already in hand here,
+        # so this costs nothing extra and saves /profile a round trip.
+        for discord_id, info in targets:
+            if info.get("first_paid"):
+                try:
+                    db.set_first_paid(discord_id, info["first_paid"])
+                except Exception as e:
+                    log.error(f"first_paid store failed for {discord_id}: {e}")
+
+        await self.sync_silver_access(targets)
+
         announced = 0
         for discord_id, info in targets:
             # Not currently paying: no announcement, and take the badge back.
@@ -625,6 +696,11 @@ class CougConnectBot(commands.Bot):
                     f"🎉 Shoutout to <@{discord_id}> — **{label}** with CougConnect "
                     f"as a **{tier_label(info['tier'])}** member! "
                     f"Thanks for backing the Cougs with us. 🏈"
+                    + (
+                        f"\nThat unlocks **{info['reward']}** — it is on your account page."
+                        if MILESTONE_SHOW_REWARD and info.get("reward")
+                        else ""
+                    )
                 )
                 announced += 1
             except Exception as e:
@@ -2235,7 +2311,8 @@ async def lookup_email(interaction: discord.Interaction, email: str):
     embed.add_field(name="Email", value=record["mp_email"], inline=False)
     embed.add_field(name="Discord Account", value=user_display, inline=False)
     embed.add_field(name="Tier", value=tier_label(record["tier"]), inline=True)
-    embed.add_field(name="Linked On", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
+    embed.add_field(name="Member since", value=(record.get("first_paid") or "—"), inline=True)
+    embed.add_field(name="Discord linked", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -2283,7 +2360,8 @@ async def profile(interaction: discord.Interaction, user: discord.Member):
     embed.add_field(name="Status", value=sub_status["status"], inline=True)
     if sub_status.get("expires_at"):
         embed.add_field(name="Expires", value=sub_status["expires_at"], inline=True)
-    embed.add_field(name="Linked On", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
+    embed.add_field(name="Member since", value=(record.get("first_paid") or "—"), inline=True)
+    embed.add_field(name="Discord linked", value=record["linked_at"][:10] if record["linked_at"] else "—", inline=True)
     embed.add_field(name="Last Synced", value=record["last_synced"][:10] if record["last_synced"] else "—", inline=True)
 
     apartment_slug = mp.get_apartment_slug(mp_data) if mp_data else None

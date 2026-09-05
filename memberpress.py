@@ -318,6 +318,17 @@ async def get_tenure_map() -> dict | None:
             "active": bool(m.get("active")),
             "tier": str(m.get("tier") or ""),
             "discord_id": str(m.get("discord_id") or ""),
+            # Computed in WordPress so the bot never has to know the reward
+            # ladder. Empty string whenever there is nothing to announce.
+            "reward": str(m.get("reward") or ""),
+            # First paid day and coverage end, for "member since" and for
+            # anniversary timing. linked_at is the Discord verify date and is
+            # NOT a membership start — these are.
+            "first_paid": str(m.get("first_paid") or ""),
+            "covered_to": str(m.get("covered_to") or ""),
+            # A date in the future means this member should hold the Silver
+            # Access role. Declarative, so a missed run self-corrects.
+            "silver_access_until": str(m.get("silver_access_until") or ""),
         }
 
     log.info(f"Tenure map loaded: {len(out)} members")
