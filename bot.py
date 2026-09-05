@@ -2294,6 +2294,123 @@ async def sync_member(interaction: discord.Interaction, user: discord.Member):
     )
 
 
+# ── /upgrade (member-facing) ──────────────────────────────────────────────────
+
+# Cheapest first. Royal sits between Insider and Silver at $20/mo and carries no
+# perks above Insider, so it is only ever offered UPWARD — a Silver or Gold
+# member is never shown it. Nobody gets nudged into paying less by accident.
+UPGRADE_LADDER = ("insider", "royal", "silver", "gold")
+
+# What each rung adds over the one below it, in the member's own terms. Royal's
+# copy has to be honest that it adds nothing but the gesture — that IS the tier.
+UPGRADE_PITCH = {
+    "royal": ("👑", "Royal", "$20/mo",
+              "Everything you have now, nothing taken away. It exists for members who want to put "
+              "more behind the athletes — and you get your own role and colour in here for it."),
+    "silver": ("🥈", "Silver", "$39.99/mo",
+               "Adds the Silver & Gold channel, a swag box, the $55 member jersey price, and $25 in "
+               "store credit every year you stay."),
+    "gold": ("🥇", "Gold", "$99.99/mo",
+             "Everything in Silver, plus the Gold lounge, your own custom jersey free, and $55 in "
+             "store credit every year you stay."),
+}
+
+# Annual levels (Basic / Silver / Gold annual). Switching plans inside the
+# MemberPress upgrade group CANCELS the old subscription outright — no proration,
+# no credit for the rest of a paid year — so annual members are pointed at a
+# human before they click anything. Env override so a new annual level can be
+# added without a deploy.
+ANNUAL_MEMBERSHIP_IDS = {
+    int(x) for x in os.getenv("MEMBERPRESS_ANNUAL_IDS", "6698,6699,6700").split(",") if x.strip().isdigit()
+}
+
+
+def change_plan_url() -> str:
+    """MemberPress's own change-plan popup, on the account page.
+
+    Deliberately NOT a direct /register/ link. A member who registers for a
+    second level while one is still live ends up holding BOTH subscriptions and
+    paying for both, with no sign anything is wrong — the bot resolves their role
+    from the highest tier and they look fine. The account page routes through the
+    upgrade group, which cancels the old subscription as part of the switch.
+    """
+    return f"{ob_url('account').rstrip('/')}/?action=subscriptions"
+
+
+@bot.tree.command(name="upgrade", description="See what the tiers above yours add, and change your plan")
+async def upgrade_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    record = db.get_member_by_discord(str(interaction.user.id))
+    if not record:
+        await interaction.followup.send(
+            "Your Discord account isn't linked to a CougConnect membership yet. Head to "
+            f"{ob_chan_md('verification')}, click **Verify Membership**, and this will work.",
+            ephemeral=True,
+        )
+        return
+
+    # Read the tier live rather than trusting the cached role. Someone who
+    # upgraded on the site an hour ago must not be pitched what they just bought,
+    # and a member object we cannot fetch means "don't know" — never "unsubscribed".
+    member_obj, active_ids = await mp.get_member_and_active_ids(record["mp_member_id"], record["mp_email"])
+    if member_obj is None:
+        await interaction.followup.send(
+            "⚠️ Couldn't reach the site just now, so I can't tell what you're on. "
+            "Nothing changed — try again in a minute.",
+            ephemeral=True,
+        )
+        return
+
+    tier = mp.resolve_tier(active_ids)
+
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="Change my plan", url=change_plan_url(), style=discord.ButtonStyle.link, emoji="⬆️",
+    ))
+
+    if tier == "unsubscribed":
+        await interaction.followup.send(
+            f"Your account (`{record['mp_email']}`) doesn't have an active membership right now. "
+            "You can start one again from your account page — the years you already put in are still on it.",
+            view=view,
+            ephemeral=True,
+        )
+        return
+
+    above = list(UPGRADE_LADDER[UPGRADE_LADDER.index(tier) + 1:]) if tier in UPGRADE_LADDER else []
+
+    if not above:
+        await interaction.followup.send(
+            "You're on **Gold** — the top of the ladder, and the tier that makes most of this possible. "
+            "There's nothing above it to sell you. Thank you.",
+            ephemeral=True,
+        )
+        return
+
+    annual = bool(set(active_ids) & ANNUAL_MEMBERSHIP_IDS)
+    description = "Here's what the tiers above yours add. Nothing changes until you confirm it on the account page."
+    if annual:
+        # Ahead of the button, not below it — by the time they have clicked
+        # through and confirmed, the paid term is already gone.
+        description = (
+            "**You're on an annual plan.** Switching cancels the rest of your paid year with no refund, "
+            f"so ask in {ob_chan_md('support')} first and we'll work it out properly.\n\n" + description
+        )
+
+    embed = discord.Embed(
+        title=f"You're on {tier_label(tier)}",
+        description=description,
+        color=tier_color(tier),
+    )
+    for slug in above:
+        emoji, name, price, blurb = UPGRADE_PITCH[slug]
+        embed.add_field(name=f"{emoji} {name} — {price}", value=blurb, inline=False)
+
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    log.info(f"/upgrade shown to discord_id={interaction.user.id} tier={tier} annual={annual}")
+
+
 @bot.tree.command(name="silver-access", description="Start your earned month in the Silver channel, or see what you have saved")
 async def silver_access_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
