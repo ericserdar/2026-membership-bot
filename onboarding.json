@@ -34,7 +34,6 @@
     "insider": ["insider_info", "player_reports", "player_ama", "vc_recaps"]
   },
   "ping_roles": {
-    "game_thread": 1540506842554433556,
     "pickem": 1540506843443372083,
     "vc_ama": 1540506845150584852
   }

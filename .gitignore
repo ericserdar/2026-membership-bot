@@ -3,3 +3,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# ops/ run artifacts — member snapshots and config backups, regenerated on demand
+ops/*.state.json
+ops/game-thread-holders.json
+ops/onboarding-backup.json
