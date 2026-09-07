@@ -37,7 +37,7 @@
   },
   {
     "q": "How do I get notified for voice chats and AMAs?",
-    "a": "Open **Channels & Roles** at the top of the channel list and pick your pings: 🎙️ VC & AMA Pings, 🎯 Pick'em Pings, 🏈 Game Thread Pings. VCs and AMAs are announced in <#1381860671339364393>."
+    "a": "Open **Channels & Roles** at the top of the channel list and pick your pings: 🎙️ VC & AMA Pings, 🎯 Pick'em Pings. VCs and AMAs are announced in <#1381860671339364393>."
   },
   {
     "q": "Where's the content mentioned on the podcast?",
@@ -53,6 +53,6 @@
   },
   {
     "q": "Discord is getting noisy — how do I quiet it down?",
-    "a": "Six habits that keep it pleasant:\n\n• **Mute a channel** — right-click it (phone: press and hold) → Mute Channel → pick how long. You can still read it; it just stops badging you.\n• **Only get pinged when it matters** — click the server name at the top → Notification Settings → Only @mentions. The pings you pick in Channels & Roles still come through.\n• **Hide what you never open** — right-click the server → Hide Muted Channels. Click a category name to collapse it.\n• **Game threads** — once you post in one it notifies you until the game ends. Open the thread → ⋯ → Leave Thread to stop.\n• **Someone is a problem** — right-click their name → Block; their messages collapse for you. Then tell us in #support-ticket — we would rather know.\n• **Too many red badges?** — Shift+Esc marks the whole server read."
+    "a": "Five habits that keep it pleasant:\n\n• **Mute a channel** — right-click it (phone: press and hold) → Mute Channel → pick how long. You can still read it; it just stops badging you.\n• **Only get pinged when it matters** — click the server name at the top → Notification Settings → Only @mentions. The pings you pick in Channels & Roles still come through.\n• **Hide what you never open** — right-click the server → Hide Muted Channels. Click a category name to collapse it.\n• **Someone is a problem** — right-click their name → Block; their messages collapse for you. Then tell us in #support-ticket — we would rather know.\n• **Too many red badges?** — Shift+Esc marks the whole server read."
   }
 ]
