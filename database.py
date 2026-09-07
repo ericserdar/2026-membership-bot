@@ -394,11 +394,12 @@ def remove_member(discord_id: str):
 
 def set_first_paid(discord_id: str, first_paid: str):
     """Record when this member's paid membership began (ISO date, may be '')."""
-    with _conn() as conn:
+    with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             "UPDATE member_links SET first_paid = ? WHERE discord_id = ?",
             (first_paid[:10] if first_paid else None, str(discord_id)),
         )
+        conn.commit()
 
 
 def get_all_members() -> list[dict]:
