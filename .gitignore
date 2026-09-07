@@ -8,3 +8,4 @@ __pycache__/
 ops/*.state.json
 ops/game-thread-holders.json
 ops/onboarding-backup.json
+ops/archive-*.txt
