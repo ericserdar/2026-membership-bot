@@ -33,6 +33,21 @@
     "royal":   ["insider_info", "player_reports", "player_ama", "vc_recaps"],
     "insider": ["insider_info", "player_reports", "player_ama", "vc_recaps"]
   },
+  "welcome_post": {
+    "_comment": "Public 'thanks for signing up' post when a member's tier role is first granted, in the room that tier just unlocked. Key = tier; delete a tier to switch its post off. {member} becomes the member mention.",
+    "gold": {
+      "channel": "gold_lounge",
+      "title": "\ud83e\udd47 New Gold member",
+      "body": "{member} just went Gold \u2014 thanks for backing CougConnect. This is your room now: the Gold lounge, player reports, AMAs and the voice chats. Say hello when you get a minute, the crew's usually around.",
+      "color": 16768768
+    },
+    "silver": {
+      "channel": "silver",
+      "title": "\ud83e\udd48 New Silver member",
+      "body": "{member} just went Silver \u2014 thanks for backing CougConnect. You've got the Silver channels, the player reports, AMAs and the community events. Say hello when you get a minute, the crew's usually around.",
+      "color": 12632256
+    }
+  },
   "ping_roles": {
     "pickem": 1540506843443372083,
     "vc_ama": 1540506845150584852

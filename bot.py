@@ -1528,6 +1528,49 @@ async def send_welcome_dm(discord_id: int, tier: str, apartment_slug: str | None
             log.info(f"Mailchimp verified-tag failed for {email}: {e}")
 
 
+async def post_tier_welcome(discord_id: int, tier: str):
+    """Public welcome in the channel a new member's tier just unlocked.
+
+    Runs alongside the welcome DM and does a different job: the DM is the
+    private channel guide, this introduces the member to the room so the
+    regulars see a new face arrive rather than a silent join.
+
+    Two things this has to get right. The mention sits in `content`, not the
+    embed — a mention rendered inside an embed does not notify, so an
+    embed-only post would look right and ping nobody. And the send is recorded
+    in onboarding_notices, so a re-verify, a tier change or a rejoin can never
+    ping the same room twice for one member.
+
+    Tiers opt in through onboarding.json → welcome_post, so turning a tier off
+    or rewording the copy never needs a code change.
+    """
+    cfg = ONBOARDING.get("welcome_post", {}).get(tier)
+    if not isinstance(cfg, dict):
+        return
+    if db.onboarding_step_sent(str(discord_id), "tier_welcome_post"):
+        return
+
+    channel = bot.get_channel(ob_channel_id(cfg.get("channel", "")))
+    if not channel:
+        log.warning(f"Tier welcome: channel '{cfg.get('channel')}' unresolved for tier {tier}")
+        return
+
+    mention = f"<@{discord_id}>"
+    embed = discord.Embed(
+        title=cfg.get("title", f"New {tier_label(tier)} member"),
+        description=cfg.get("body", "").replace("{member}", mention),
+        colour=discord.Colour(int(cfg.get("color", 0x2B2D31))),
+    )
+    try:
+        await channel.send(content=mention, embed=embed)
+        db.record_onboarding_step(str(discord_id), "tier_welcome_post")
+        log.info(f"Tier welcome posted for discord_id={discord_id} tier={tier} channel=#{channel.name}")
+    except Exception as e:
+        # Best-effort, exactly like the welcome DM: a missing Send Messages
+        # permission must never fail the verification that triggered it.
+        log.error(f"Tier welcome failed for discord_id={discord_id} tier={tier}: {e}")
+
+
 def add_active_subscriptions_field(embed: discord.Embed, mp_member: dict | None):
     """List all active MemberPress subscriptions on the embed when there's more than one."""
     if not mp_member:
@@ -2820,6 +2863,7 @@ async def handle_verify_page_post(request: web.Request) -> web.Response:
 
     log.info(f"Verified discord_id={discord_id} email={email} tier={tier} apartment={apartment_slug}")
     asyncio.create_task(send_welcome_dm(int(discord_id), tier, apartment_slug, email))
+    asyncio.create_task(post_tier_welcome(int(discord_id), tier))
     asyncio.create_task(wp_link.push_link(email, discord_id, _display_name(int(discord_id))))
     return _success_page(tier)
 
@@ -3040,6 +3084,7 @@ async def handle_connect_callback(request: web.Request) -> web.Response:
         if role_ok:
             await assign_apartment_role(int(discord_id), mp.get_apartment_slug(mp_member))
             asyncio.create_task(send_welcome_dm(int(discord_id), tier, mp.get_apartment_slug(mp_member), email))
+            asyncio.create_task(post_tier_welcome(int(discord_id), tier))
     # Not in the server yet: on_member_join restores the role and sends the guide when they arrive.
     asyncio.create_task(wp_link.push_link(email, discord_id, username or _display_name(int(discord_id))))
     if email and not (in_server and role_ok):  # send_welcome_dm tags the rest
