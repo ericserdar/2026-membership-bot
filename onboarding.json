@@ -25,12 +25,13 @@
     "player_ama": 1198447515813564476,
     "vc_recaps": 1395631735546576916,
     "gold_lounge": 1082893780941815879,
-    "silver": 1082893993970507816
+    "silver": 1082893993970507816,
+    "royal_lounge": 1546660403411427398
   },
   "tier_channels": {
-    "gold":    ["gold_lounge", "silver", "insider_info", "player_reports", "player_ama", "vc_recaps"],
-    "silver":  ["silver", "insider_info", "player_reports", "player_ama", "vc_recaps"],
-    "royal":   ["insider_info", "player_reports", "player_ama", "vc_recaps"],
+    "gold":    ["gold_lounge", "silver", "royal_lounge", "insider_info", "player_reports", "player_ama", "vc_recaps"],
+    "silver":  ["silver", "royal_lounge", "insider_info", "player_reports", "player_ama", "vc_recaps"],
+    "royal":   ["royal_lounge", "insider_info", "player_reports", "player_ama", "vc_recaps"],
     "insider": ["insider_info", "player_reports", "player_ama", "vc_recaps"]
   },
   "welcome_post": {
@@ -46,6 +47,12 @@
       "title": "\ud83e\udd48 New Silver member",
       "body": "{member} just went Silver \u2014 thanks for backing CougConnect. You've got the Silver channels, the player reports, AMAs and the community events. Say hello when you get a minute, the crew's usually around.",
       "color": 12632256
+    },
+    "royal": {
+      "channel": "royal_lounge",
+      "title": "\ud83d\udc51 New Royal member",
+      "body": "{member} just went Royal \u2014 thanks for backing CougConnect at a higher level. Royal doesn't buy extra perks; it's choosing to give more, and that's what keeps this place running. Glad to have you.",
+      "color": 1719039
     }
   },
   "ping_roles": {

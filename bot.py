@@ -1053,8 +1053,9 @@ def _welcome_dm_parts(tier: str, apartment_slug: str | None = None) -> tuple[str
         "vc_recaps": "catch up on any voice chat you missed",
         "gold_lounge": "the Gold lounge",
         "silver": "Silver & Gold members' channel",
+        "royal_lounge": "the Royal lounge",
     }
-    order = ["general", "news", "player_reports", "player_ama", "gold_lounge", "silver", "insider_info", "vc_recaps"]
+    order = ["general", "news", "player_reports", "player_ama", "gold_lounge", "silver", "royal_lounge", "insider_info", "vc_recaps"]
     keys = ["general", "news"] + [k for k in order if k in tier_keys and k not in ("general", "news")]
     channel_lines = "\n".join(f"{ob_chan_md(k)} — {blurbs.get(k, '')}".rstrip(" —") for k in keys if ob_channel_id(k))
 
@@ -2882,7 +2883,7 @@ def _display_name(discord_id: int) -> str:
 def _success_page(tier: str, in_server: bool = True) -> web.Response:
     """Shared 'you're verified' page for the verify form and the OAuth connect."""
     tier_display = tier_label(tier)
-    home_key = {"gold": "gold_lounge", "silver": "silver", "royal": "insider_info",
+    home_key = {"gold": "gold_lounge", "silver": "silver", "royal": "royal_lounge",
                 "insider": "insider_info"}.get(tier, "general")
     if in_server:
         note = "We also sent you a Discord DM with a channel guide."
