@@ -795,6 +795,27 @@ class CougConnectBot(commands.Bot):
             f"🔔 ping-role holders: {_count_ping_role_holders()}  |  nudges sent: {nudges}  |  "
             f"verify failures: {len(db.get_verify_failures_since(168))}"
         )
+
+        # Chapter goals. Silent when no chapter is configured, and silent on a
+        # failed fetch — a digest that reported Idaho at zero because the site
+        # was briefly down would read as a chapter losing everyone.
+        chapters = await mp.get_chapters()
+        if chapters:
+            lines.append("")
+            lines.append("**🗺️ Chapters**")
+            for ch in chapters:
+                if ch.get("next"):
+                    goal = (
+                        f"{ch['points']}/{ch['next']['points']} pts "
+                        f"— {ch['remaining']} to go for _{ch['next']['reward']}_"
+                    )
+                else:
+                    goal = f"{ch['points']} pts — every reward earned"
+                lines.append(
+                    f"• **{ch['name']}**: {goal}  "
+                    f"({ch['members']} member(s), {ch['clicks']} click(s))"
+                )
+
         if prev:
             lines.append(f"_Compared to {prev['snapshot_date']}_")
         await post_admin_log("\n".join(lines))

@@ -271,6 +271,45 @@ TENURE_URL = os.getenv("CCSB_TENURE_URL", "")
 TENURE_KEY = os.getenv("CCSB_TENURE_KEY", "")
 
 
+async def get_chapters() -> list | None:
+    """Chapter referral standings, for the Monday digest.
+
+    Derived from CCSB_TENURE_URL rather than needing its own setting — the two
+    routes live in the same ccsb/v1 namespace. Unauthenticated on purpose: the
+    same numbers are on the public /chapters/ board.
+
+    Returns None on any failure so a caller can say nothing rather than report
+    a chapter as having lost members.
+    """
+    import logging
+    log = logging.getLogger("cougconnect")
+
+    if not TENURE_URL:
+        return None
+
+    # Same derivation wp_link.BASE uses. Deliberately duplicated rather than
+    # imported: memberpress.py is on the critical path for every tier sync and
+    # must not gain a dependency for the sake of a digest line. A naive
+    # rsplit("/") breaks on a trailing slash, turning this into /tenure/chapters.
+    base = TENURE_URL.strip().rstrip("/")
+    base = base[: -len("/tenure")] if base.endswith("/tenure") else base
+    url = base + "/chapters"
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    log.error(f"Chapter fetch failed: HTTP {resp.status}")
+                    return None
+                payload = await resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log.error(f"Chapter fetch failed: {exc}")
+        return None
+
+    return payload.get("chapters") or []
+
+
 async def get_tenure_map() -> dict | None:
     """Fetch paid-membership tenure for everyone linked to Discord.
 
