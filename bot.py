@@ -1754,6 +1754,11 @@ JERSEY_SIZES_FALLBACK = [
 ]
 
 
+# Forms whose submit is mid-flight to WordPress, so a second modal sent in the
+# same few seconds can't slip past the completed_at check.
+_jersey_submitting: set[str] = set()
+
+
 class JerseyDetailsModal(discord.ui.Modal, title="Your CougConnect jersey"):
     number = discord.ui.TextInput(label="Number (0–99)", min_length=1, max_length=2, placeholder="47")
     name_on_back = discord.ui.TextInput(label="Name on the back (up to 15 letters)", max_length=15, placeholder="BACHMEIER")
@@ -1775,6 +1780,20 @@ class JerseyDetailsModal(discord.ui.Modal, title="Your CougConnect jersey"):
         form = self.form
         discord_id = str(interaction.user.id)
 
+        # The details window can be opened twice before either is sent; only the
+        # first submit counts. Re-read, because self.form is from button time.
+        latest = db.get_jersey_form(form["message_id"]) or {}
+        if latest.get("completed_at") or form["message_id"] in _jersey_submitting:
+            await interaction.followup.send("This jersey form was already submitted. Need a change? Message an admin.")
+            await close_jersey_form_message(interaction.message)
+            return
+        _jersey_submitting.add(form["message_id"])
+        try:
+            await self._submit(interaction, form, discord_id)
+        finally:
+            _jersey_submitting.discard(form["message_id"])
+
+    async def _submit(self, interaction: discord.Interaction, form: dict, discord_id: str):
         status, body = await wp_link.jersey_claim(
             discord_id,
             form.get("email") or "",
@@ -1804,12 +1823,13 @@ class JerseyDetailsModal(discord.ui.Modal, title="Your CougConnect jersey"):
                 f"**{claim.get('jersey_color')} · {claim.get('shirt_size')}**\n"
                 f"#{claim.get('jersey_number')} {claim.get('name_on_back')}\n\n"
                 f"Shipping to: {where}\n\n"
-                "It goes in with the next supplier order. Need to change something? Use the menus above "
-                "again before it's ordered. You can also follow it on your CougConnect account page."
+                "It goes in with the next supplier order. Need to change something? Message an admin "
+                "before it's ordered. You can also follow it on your CougConnect account page."
             ),
             color=discord.Color(0x1A3AFF),
         )
         await interaction.followup.send(embed=embed)
+        await close_jersey_form_message(interaction.message)
         log.info(f"Jersey form {body.get('status')}: discord_id={discord_id} {claim.get('jersey_color')} {claim.get('shirt_size')} #{claim.get('jersey_number')}")
         if body.get("status") == "created":
             await post_admin_log(
@@ -1817,6 +1837,23 @@ class JerseyDetailsModal(discord.ui.Modal, title="Your CougConnect jersey"):
                 f"{claim.get('jersey_color')} {claim.get('shirt_size')} · #{claim.get('jersey_number')} {claim.get('name_on_back')} "
                 f"— {body.get('queued')} waiting for an order."
             )
+
+
+async def close_jersey_form_message(message: discord.Message | None):
+    """Strip the menus and button off a submitted form so it can't be sent
+    again. A new giveaway means a new DM from /send-jersey-form."""
+    if not message:
+        return
+    embed = discord.Embed(
+        title="👕 Your CougConnect jersey — submitted",
+        description="This form is closed. Your details are in the message below.\n\nNeed a change? Message an admin before it's ordered.",
+        color=discord.Color(0x1A3AFF),
+    )
+    embed.set_footer(text="CougConnect")
+    try:
+        await message.edit(embed=embed, view=None)
+    except discord.HTTPException as e:
+        log.warning(f"Couldn't close jersey form message {message.id}: {e}")
 
 
 class JerseyFormView(discord.ui.View):
@@ -1835,6 +1872,11 @@ class JerseyFormView(discord.ui.View):
         form = db.get_jersey_form(str(interaction.message.id)) if interaction.message else None
         if not form or form["discord_id"] != str(interaction.user.id):
             await interaction.response.send_message("This jersey form isn't open anymore — ask an admin to send a new one.", ephemeral=True)
+            return None
+        if form.get("completed_at"):
+            # Forms submitted before closing existed still show their controls.
+            await interaction.response.send_message("This jersey form was already submitted. Need a change? Message an admin.", ephemeral=True)
+            await close_jersey_form_message(interaction.message)
             return None
         return form
 
@@ -2053,7 +2095,7 @@ async def send_jersey_form(interaction: discord.Interaction, user: discord.Membe
             "You won a custom BYU replica jersey! 🎉 Three quick steps:\n\n"
             "**1.** Pick a color\n**2.** Pick a size\n**3.** Hit the button and add your number, "
             "the name for the back, and where to ship it\n\n"
-            "You can come back and change it any time before it's ordered."
+            "The form closes once you submit, so double-check your picks first."
         ),
         color=discord.Color(0x1A3AFF),
     )
