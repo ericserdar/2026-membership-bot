@@ -186,6 +186,21 @@ def init_db():
                 used        INTEGER DEFAULT 0
             )
         """)
+        # /send-jersey-form: one open invite per member. The DM's buttons are
+        # persistent, so the picks live here rather than in the view — a
+        # redeploy between choosing a color and submitting loses nothing.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS jersey_invites (
+                discord_id    TEXT PRIMARY KEY,
+                email         TEXT,
+                sent_by       TEXT,
+                sent_at       TEXT,
+                jersey_color  TEXT,
+                shirt_size    TEXT,
+                address       TEXT,
+                completed_at  TEXT
+            )
+        """)
         # unlinked_members grew columns so the funnel can tell "never verified"
         # from "verified later" without deleting the signup history.
         for col_decl in ("email TEXT", "registered_at TEXT", "verified_at TEXT"):
@@ -882,5 +897,47 @@ def record_mailchimp_sync(mp_member_id: int, email: str, tags: list[str]):
         conn.execute(
             "INSERT OR REPLACE INTO mailchimp_sync (mp_member_id, email, tags, synced_at) VALUES (?, ?, ?, ?)",
             (mp_member_id, email, ",".join(sorted(tags)), datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+
+# ── Jersey invites (/send-jersey-form) ───────────────────────────────────────
+
+def create_jersey_invite(discord_id: str, email: str, sent_by: str, address: str = ""):
+    """Open (or re-open) a member's invite. Re-sending clears earlier picks.
+
+    `address` is the one-line prefill for the modal, stored because a modal has
+    to open within Discord's 3-second window — no time to ask the site then.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO jersey_invites (discord_id, email, sent_by, sent_at, jersey_color, shirt_size, address, completed_at) "
+            "VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+            (discord_id, email, sent_by, datetime.utcnow().isoformat(), address),
+        )
+        conn.commit()
+
+
+def get_jersey_invite(discord_id: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM jersey_invites WHERE discord_id = ?", (discord_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_jersey_pick(discord_id: str, field: str, value: str):
+    if field not in ("jersey_color", "shirt_size"):
+        raise ValueError(field)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(f"UPDATE jersey_invites SET {field} = ? WHERE discord_id = ?", (value, discord_id))
+        conn.commit()
+
+
+def complete_jersey_invite(discord_id: str, address: str):
+    """Mark submitted, keeping what they typed as the prefill for any edit."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE jersey_invites SET completed_at = ?, address = ? WHERE discord_id = ?",
+            (datetime.utcnow().isoformat(), address, discord_id),
         )
         conn.commit()

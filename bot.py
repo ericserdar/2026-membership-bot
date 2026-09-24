@@ -253,6 +253,7 @@ class CougConnectBot(commands.Bot):
         self.add_view(VerifyView())
         self.add_view(ReSyncView())
         self.add_view(FlagReasonView())
+        self.add_view(JerseyFormView())
         await self.tree.sync()
         log.info("Slash commands synced.")
         self.cleanup_tokens_task.start()
@@ -1740,6 +1741,126 @@ class FlagReasonView(discord.ui.View):
         await interaction.response.send_modal(FlagReasonModal(flag_id, interaction.message))
 
 
+# ── Jersey form (admin sends via /send-jersey-form, member fills it in a DM) ──
+
+# Only used to register the persistent view at startup. The DM itself is built
+# from the lists WordPress returns, and WordPress validates every pick — these
+# just have to be non-empty for discord.py to accept the selects.
+JERSEY_COLORS_FALLBACK = ["Royal Blue", "Navy", "White"]
+JERSEY_SIZES_FALLBACK = [
+    "Youth S", "Youth M", "Youth L", "Youth XL",
+    "Adult S", "Adult M", "Adult L", "Adult XL", "Adult 2XL", "Adult 3XL",
+    "Women's S", "Women's M", "Women's L", "Women's XL", "Women's XXL",
+]
+
+
+class JerseyDetailsModal(discord.ui.Modal, title="Your CougConnect jersey"):
+    number = discord.ui.TextInput(label="Number (0–99)", min_length=1, max_length=2, placeholder="47")
+    name_on_back = discord.ui.TextInput(label="Name on the back (up to 15 letters)", max_length=15, placeholder="BACHMEIER")
+    address = discord.ui.TextInput(
+        label="Shipping address",
+        style=discord.TextStyle.paragraph,
+        max_length=200,
+        placeholder="123 N Main St Apt 4, Provo, UT 84604",
+    )
+
+    def __init__(self, invite: dict):
+        super().__init__()
+        self.invite = invite
+        if invite.get("address"):
+            self.address.default = invite["address"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        invite = self.invite
+        discord_id = str(interaction.user.id)
+
+        status, body = await wp_link.jersey_claim(
+            discord_id,
+            invite.get("email") or "",
+            jersey_color=invite.get("jersey_color"),
+            shirt_size=invite.get("shirt_size"),
+            jersey_number=str(self.number).strip(),
+            name_on_back=str(self.name_on_back).strip(),
+            address=str(self.address).strip(),
+            sent_by=invite.get("sent_by") or "",
+        )
+
+        if status == 0:
+            await interaction.followup.send("⚠️ Couldn't reach the site just now. Nothing was saved — press the button and try again in a minute.")
+            return
+        if status != 200:
+            msg = body.get("message") or "That didn't go through. Nothing was saved."
+            await interaction.followup.send(f"⚠️ {msg}\n\nPress **Enter number, name & address** to try again — your picks are kept.")
+            return
+
+        claim = body.get("claim") or {}
+        db.complete_jersey_invite(discord_id, str(self.address).strip())
+        where = f"{claim.get('addr1', '')}, {claim.get('city', '')}, {claim.get('state', '')} {claim.get('zip', '')}"
+        embed = discord.Embed(
+            title="✅ You're in the jersey queue" if body.get("status") == "created" else "✅ Jersey details updated",
+            description=(
+                f"**{claim.get('jersey_color')} · {claim.get('shirt_size')}**\n"
+                f"#{claim.get('jersey_number')} {claim.get('name_on_back')}\n\n"
+                f"Shipping to: {where}\n\n"
+                "It goes in with the next supplier order. Need to change something? Use the menus above "
+                "again before it's ordered. You can also follow it on your CougConnect account page."
+            ),
+            color=discord.Color(0x1A3AFF),
+        )
+        await interaction.followup.send(embed=embed)
+        log.info(f"Jersey form {body.get('status')}: discord_id={discord_id} {claim.get('jersey_color')} {claim.get('shirt_size')} #{claim.get('jersey_number')}")
+        if body.get("status") == "created":
+            await post_admin_log(
+                f"👕 **{interaction.user}** filled in the jersey form (sent by {invite.get('sent_by') or 'an admin'}): "
+                f"{claim.get('jersey_color')} {claim.get('shirt_size')} · #{claim.get('jersey_number')} {claim.get('name_on_back')} "
+                f"— {body.get('queued')} waiting for an order."
+            )
+
+
+class JerseyFormView(discord.ui.View):
+    """Persistent: every DM shares these custom_ids, and the member's picks are
+    read back from jersey_invites by user id, so a redeploy mid-form is harmless."""
+
+    def __init__(self, colors: list[str] | None = None, sizes: list[str] | None = None):
+        super().__init__(timeout=None)
+        colors = (colors or JERSEY_COLORS_FALLBACK)[:25]
+        sizes = (sizes or JERSEY_SIZES_FALLBACK)[:25]
+        self.color_select.options = [discord.SelectOption(label=c, value=c) for c in colors]
+        self.size_select.options = [discord.SelectOption(label=z, value=z) for z in sizes]
+
+    async def _invite(self, interaction: discord.Interaction) -> dict | None:
+        invite = db.get_jersey_invite(str(interaction.user.id))
+        if not invite:
+            await interaction.response.send_message("This jersey form isn't open for you anymore — ask an admin to send a new one.", ephemeral=True)
+        return invite
+
+    @discord.ui.select(placeholder="1. Pick a color", custom_id="jersey_form_color", options=[discord.SelectOption(label="-")], row=0)
+    async def color_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not await self._invite(interaction):
+            return
+        db.set_jersey_pick(str(interaction.user.id), "jersey_color", select.values[0])
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="2. Pick a size", custom_id="jersey_form_size", options=[discord.SelectOption(label="-")], row=1)
+    async def size_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not await self._invite(interaction):
+            return
+        db.set_jersey_pick(str(interaction.user.id), "shirt_size", select.values[0])
+        await interaction.response.defer()
+
+    @discord.ui.button(label="3. Enter number, name & address", style=discord.ButtonStyle.primary, emoji="👕", custom_id="jersey_form_details", row=2)
+    async def details_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        invite = await self._invite(interaction)
+        if not invite:
+            return
+        missing = [label for key, label in (("jersey_color", "a color"), ("shirt_size", "a size")) if not invite.get(key)]
+        if missing:
+            await interaction.response.send_message(f"Pick {' and '.join(missing)} from the menus first.", ephemeral=True)
+            return
+        await interaction.response.send_modal(JerseyDetailsModal(invite))
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
     """First contact. A new joiner can only see three channels, so say the one
@@ -1882,6 +2003,82 @@ async def link_member(interaction: discord.Interaction, user: discord.Member, em
             "⚠️ Saved link but couldn't assign role — check role IDs in config.",
             ephemeral=True,
         )
+
+
+@bot.tree.command(name="send-jersey-form", description="DM a member the form to pick their jersey — it lands in the site's jersey queue")
+@app_commands.describe(user="Member to send the jersey form to")
+@app_commands.default_permissions(administrator=True)
+async def send_jersey_form(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    if user.bot:
+        await interaction.followup.send("❌ That's a bot.", ephemeral=True)
+        return
+
+    record = db.get_member_by_discord(str(user.id))
+    email = record["mp_email"] if record else ""
+    status, body = await wp_link.jersey_claim(user.id, email, check=True)
+
+    if status == 0:
+        await interaction.followup.send("⚠️ Couldn't reach the site (or CCSB_TENURE_URL/KEY aren't set). Nothing sent.", ephemeral=True)
+        return
+    if status == 404 and body.get("code") == "rest_no_route":
+        await interaction.followup.send("⚠️ The site doesn't have the jersey route yet — cc-shirt-batches 1.26.0 needs to be installed. Nothing sent.", ephemeral=True)
+        return
+    if status == 404:
+        await interaction.followup.send(
+            f"❌ {user.mention} isn't linked to a CougConnect account, so there's no queue entry to attach a jersey to. "
+            "Link them with `/link-member` first. Nothing sent.",
+            ephemeral=True,
+        )
+        return
+    if status != 200:
+        await interaction.followup.send(f"⚠️ Site said HTTP {status}: {body.get('message') or body}. Nothing sent.", ephemeral=True)
+        return
+
+    existing = body.get("existing")
+    if existing and existing.get("status") != "claimed":
+        await interaction.followup.send(
+            f"❌ {body.get('name')} already has a jersey ({existing.get('status')}: {existing.get('jersey_color')} "
+            f"{existing.get('shirt_size')} #{existing.get('jersey_number')} {existing.get('name_on_back')}). "
+            "It's past the queue, so the form would be refused. Nothing sent.",
+            ephemeral=True,
+        )
+        return
+
+    sent_by = interaction.user.display_name
+    db.create_jersey_invite(str(user.id), body.get("email") or email, sent_by, body.get("address") or "")
+
+    embed = discord.Embed(
+        title="👕 Pick your CougConnect jersey",
+        description=(
+            "We've got a custom BYU replica jersey for you. Three quick steps:\n\n"
+            "**1.** Pick a color\n**2.** Pick a size\n**3.** Hit the button and add your number, "
+            "the name for the back, and where to ship it\n\n"
+            "You can come back and change it any time before it's ordered."
+        ),
+        color=discord.Color(0x1A3AFF),
+    )
+    if existing:
+        embed.add_field(
+            name="Already in the queue",
+            value=f"{existing.get('jersey_color')} {existing.get('shirt_size')} · #{existing.get('jersey_number')} "
+                  f"{existing.get('name_on_back')}. Filling this in again updates it.",
+            inline=False,
+        )
+    embed.set_footer(text="CougConnect")
+
+    try:
+        await user.send(embed=embed, view=JerseyFormView(body.get("colors"), body.get("sizes")))
+    except discord.Forbidden:
+        await interaction.followup.send(f"❌ {user.mention} has DMs from server members turned off, so the form couldn't be delivered.", ephemeral=True)
+        return
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Couldn't DM {user.mention}: {e}", ephemeral=True)
+        return
+
+    note = " They already had one in the queue — this lets them change it." if existing else ""
+    await interaction.followup.send(f"✅ Sent the jersey form to {user.mention} ({body.get('name')}, {body.get('tier') or 'no tier'}).{note}", ephemeral=True)
+    log.info(f"/send-jersey-form: {sent_by} -> discord_id={user.id} ({body.get('email')})")
 
 
 @bot.tree.command(name="unlink-member", description="Remove a member's CougConnect link and set to Unsubscribed")

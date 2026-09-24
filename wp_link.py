@@ -101,3 +101,26 @@ async def silver_access(discord_id: int | str, check: bool = False) -> tuple[int
     except Exception as e:
         log.error(f"silver-access call failed for {discord_id}: {e}")
         return 0, {}
+
+
+async def jersey_claim(discord_id: int | str, email: str = "", check: bool = False, **fields) -> tuple[int, dict]:
+    """Look up (check=True) or submit a member's jersey for the site's queue.
+
+    Identified by Discord ID, with the bot's linked email as a fallback for
+    members WordPress hasn't been told about. Returns the raw (status, body):
+    404 = no account, 409 = already ordered, 400 = a field failed validation
+    (body["message"] is member-readable), 0 = the site was unreachable.
+    """
+    if not configured():
+        return 0, {}
+
+    payload = {"discord_id": str(discord_id), "email": email or ""}
+    if check:
+        payload["check"] = 1
+    payload.update({k: v for k, v in fields.items() if v is not None})
+
+    try:
+        return await _post("/jersey-claim", payload)
+    except Exception as e:
+        log.error(f"jersey-claim call failed for {discord_id}: {e}")
+        return 0, {}
