@@ -186,18 +186,22 @@ def init_db():
                 used        INTEGER DEFAULT 0
             )
         """)
-        # /send-jersey-form: one open invite per member. The DM's buttons are
-        # persistent, so the picks live here rather than in the view — a
-        # redeploy between choosing a color and submitting loses nothing.
+        # /send-jersey-form: one row per DM, keyed by the DM's message id, so a
+        # member who wins twice has two independent forms. The DM's buttons are
+        # persistent and the picks live here, so a redeploy mid-form loses nothing.
+        # claim_id is the site's row once submitted, so an edit updates that jersey.
+        # (An earlier per-member jersey_invites table was retired unused.)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS jersey_invites (
-                discord_id    TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS jersey_forms (
+                message_id    TEXT PRIMARY KEY,
+                discord_id    TEXT,
                 email         TEXT,
                 sent_by       TEXT,
                 sent_at       TEXT,
                 jersey_color  TEXT,
                 shirt_size    TEXT,
                 address       TEXT,
+                claim_id      INTEGER,
                 completed_at  TEXT
             )
         """)
@@ -901,43 +905,39 @@ def record_mailchimp_sync(mp_member_id: int, email: str, tags: list[str]):
         conn.commit()
 
 
-# ── Jersey invites (/send-jersey-form) ───────────────────────────────────────
+# ── Jersey forms (/send-jersey-form) ─────────────────────────────────────────
 
-def create_jersey_invite(discord_id: str, email: str, sent_by: str, address: str = ""):
-    """Open (or re-open) a member's invite. Re-sending clears earlier picks.
-
-    `address` is the one-line prefill for the modal, stored because a modal has
-    to open within Discord's 3-second window — no time to ask the site then.
-    """
+def create_jersey_form(message_id: str, discord_id: str, email: str, sent_by: str, address: str = ""):
+    """One giveaway jersey. `address` is the one-line prefill for the modal,
+    stored because a modal must open within Discord's 3-second window."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO jersey_invites (discord_id, email, sent_by, sent_at, jersey_color, shirt_size, address, completed_at) "
-            "VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
-            (discord_id, email, sent_by, datetime.utcnow().isoformat(), address),
+            "INSERT OR REPLACE INTO jersey_forms (message_id, discord_id, email, sent_by, sent_at, address) VALUES (?, ?, ?, ?, ?, ?)",
+            (message_id, discord_id, email, sent_by, datetime.utcnow().isoformat(), address),
         )
         conn.commit()
 
 
-def get_jersey_invite(discord_id: str) -> dict | None:
+def get_jersey_form(message_id: str) -> dict | None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM jersey_invites WHERE discord_id = ?", (discord_id,)).fetchone()
+        row = conn.execute("SELECT * FROM jersey_forms WHERE message_id = ?", (message_id,)).fetchone()
     return dict(row) if row else None
 
 
-def set_jersey_pick(discord_id: str, field: str, value: str):
+def set_jersey_pick(message_id: str, field: str, value: str):
     if field not in ("jersey_color", "shirt_size"):
         raise ValueError(field)
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(f"UPDATE jersey_invites SET {field} = ? WHERE discord_id = ?", (value, discord_id))
+        conn.execute(f"UPDATE jersey_forms SET {field} = ? WHERE message_id = ?", (value, message_id))
         conn.commit()
 
 
-def complete_jersey_invite(discord_id: str, address: str):
+def complete_jersey_form(message_id: str, address: str, claim_id: int | None):
     """Mark submitted, keeping what they typed as the prefill for any edit."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "UPDATE jersey_invites SET completed_at = ?, address = ? WHERE discord_id = ?",
-            (datetime.utcnow().isoformat(), address, discord_id),
+            "UPDATE jersey_forms SET completed_at = ?, address = ?, claim_id = COALESCE(?, claim_id) WHERE message_id = ?",
+            (datetime.utcnow().isoformat(), address, claim_id, message_id),
         )
         conn.commit()
