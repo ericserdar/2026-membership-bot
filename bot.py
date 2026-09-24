@@ -816,6 +816,31 @@ class CougConnectBot(commands.Bot):
                     f"({ch['members']} member(s), {ch['clicks']} click(s))"
                 )
 
+        # Store credit. The programme's whole point is that members spend it;
+        # nothing reported that until now, and it ran 641 issued / 7 spent for
+        # months without anyone noticing. Silent on a failed fetch and on a
+        # plugin too old to serve the route.
+        credit = await mp.get_credit_stats()
+        if credit and credit.get("issued"):
+            lines.append("")
+            lines.append("**💳 Store credit**")
+            lines.append(
+                f"• {credit['redeemed']}/{credit['issued']} redeemed "
+                f"({credit['rate'] * 100:.1f}%) — "
+                f"${credit['value']['redeemed']:,.0f} back of "
+                f"${credit['value']['issued']:,.0f} out"
+            )
+            if credit.get("unnotified"):
+                lines.append(
+                    f"• ⚠️ {credit['unnotified']} issued but never announced — "
+                    "those members do not know they have a code"
+                )
+            for c in credit.get("cohorts", [])[:2]:
+                lines.append(
+                    f"• told {c['notified']} ({c['days_since']}d ago): "
+                    f"{c['redeemed']}/{c['told']} spent ({c['rate'] * 100:.1f}%)"
+                )
+
         if prev:
             lines.append(f"_Compared to {prev['snapshot_date']}_")
         await post_admin_log("\n".join(lines))

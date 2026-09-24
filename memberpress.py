@@ -310,6 +310,43 @@ async def get_chapters() -> list | None:
     return payload.get("chapters") or []
 
 
+async def get_credit_stats(cohorts: int = 3) -> dict | None:
+    """Store-credit issue-vs-redeem figures, for the Monday digest.
+
+    Keyed, unlike get_chapters(): this is revenue data with no public board
+    mirroring it, so it needs CCSB_TENURE_KEY.
+
+    Returns None on any failure — a digest line claiming 0% redemption because
+    the site hiccuped would read as the programme failing.
+    """
+    import logging
+    log = logging.getLogger("cougconnect")
+
+    if not TENURE_URL or not TENURE_KEY:
+        return None
+
+    # Same derivation as get_chapters(); see the note there on the trailing slash.
+    base = TENURE_URL.strip().rstrip("/")
+    base = base[: -len("/tenure")] if base.endswith("/tenure") else base
+    url = f"{base}/credit-stats?cohorts={cohorts}"
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"X-CCSB-Key": TENURE_KEY}) as resp:
+                if resp.status == 404:
+                    # cc-shirt-batches older than 1.25.0. Not an error worth
+                    # logging every Monday.
+                    return None
+                if resp.status != 200:
+                    log.error(f"Credit stats fetch failed: HTTP {resp.status}")
+                    return None
+                return await resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log.error(f"Credit stats fetch failed: {exc}")
+        return None
+
+
 async def get_tenure_map() -> dict | None:
     """Fetch paid-membership tenure for everyone linked to Discord.
 
