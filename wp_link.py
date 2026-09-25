@@ -81,8 +81,8 @@ async def push_links(links: list[dict]) -> dict:
     return totals
 
 
-async def silver_access(discord_id: int | str, check: bool = False) -> tuple[int, dict]:
-    """Look up or spend a member's Silver channel month.
+async def silver_access(discord_id: int | str, check: bool = False, kind: str = "silver") -> tuple[int, dict]:
+    """Look up or spend a member's Silver channel month (or, kind="gold", Gold Lounge month).
 
     WordPress stays the source of truth for what they hold and how long a
     window runs; Discord is only where the button happens to be. Returns the
@@ -95,6 +95,8 @@ async def silver_access(discord_id: int | str, check: bool = False) -> tuple[int
     payload = {"discord_id": str(discord_id)}
     if check:
         payload["check"] = 1
+    if kind == "gold":
+        payload["kind"] = "gold"
 
     try:
         return await _post("/silver-access", payload)

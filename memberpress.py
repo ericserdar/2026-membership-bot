@@ -405,6 +405,8 @@ async def get_tenure_map() -> dict | None:
             # A date in the future means this member should hold the Silver
             # Access role. Declarative, so a missed run self-corrects.
             "silver_access_until": str(m.get("silver_access_until") or ""),
+            # Same for the Gold Lounge month Silver members earn.
+            "gold_access_until": str(m.get("gold_access_until") or ""),
         }
 
     log.info(f"Tenure map loaded: {len(out)} members")

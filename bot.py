@@ -157,6 +157,10 @@ MILESTONE_SHOW_REWARD = _flag("MILESTONE_SHOW_REWARD")
 # rather than the Silver Subscriber one: these members are guests, the channel
 # should be able to tell, and assign_role() must not strip it as a tier role.
 SILVER_ACCESS_ROLE_ID = int(os.getenv("DISCORD_ROLE_SILVER_ACCESS_ID", "0"))
+# Same idea one tier up: a month in the Gold Lounge, earned by Silver members at
+# years three and four on the loyalty clock. Its own role ("Gold Lounge", not
+# hoisted), never the Gold Subscriber tier role.
+GOLD_LOUNGE_ROLE_ID = int(os.getenv("DISCORD_ROLE_GOLD_LOUNGE_ID", "1552902180405772308"))
 ONBOARDING_DRY_RUN = _flag("ONBOARDING_DRY_RUN")   # log/admin-log "would DM …" and send nothing
 ONBOARDING_DM_DAILY_CAP = int(os.getenv("ONBOARDING_DM_DAILY_CAP", "50"))
 UNVERIFIED_NUDGE_HOURS = (24, 72)   # hours after joining without verifying → nudge 1, nudge 2
@@ -521,29 +525,37 @@ class CougConnectBot(commands.Bot):
         await self.wait_until_ready()
 
     async def sync_silver_access(self, targets):
-        """Hold the Silver Access role exactly while the window is open.
+        """Hold the Silver Access role exactly while the window is open."""
+        await self._sync_access(targets, SILVER_ACCESS_ROLE_ID, "silver_access_until", "Silver Access")
+
+    async def sync_gold_lounge(self, targets):
+        """Hold the Gold Lounge role exactly while the window is open."""
+        await self._sync_access(targets, GOLD_LOUNGE_ROLE_ID, "gold_access_until", "Gold Lounge")
+
+    async def _sync_access(self, targets, role_id, field, label):
+        """Reconcile an earned-access role against WordPress's end dates.
 
         Declarative rather than event-driven: WordPress owns the end date and
         this reconciles to it, so a missed run, a rejoin or a manual change all
         self-correct on the next pass. Never touches a tier role.
         """
-        if not SILVER_ACCESS_ROLE_ID:
+        if not role_id:
             return
 
         guild = self.get_guild(GUILD_ID)
         if guild is None:
             return
 
-        role = guild.get_role(SILVER_ACCESS_ROLE_ID)
+        role = guild.get_role(role_id)
         if role is None:
-            log.warning("Silver Access role %s not found", SILVER_ACCESS_ROLE_ID)
+            log.warning("%s role %s not found", label, role_id)
             return
 
         today = dt.now(timezone.utc).strftime("%Y-%m-%d")
         added = removed = 0
 
         for discord_id, info in targets:
-            until = info.get("silver_access_until") or ""
+            until = info.get(field) or ""
             # Only while they are still paying. Discord is a members-only
             # benefit, so someone who lapses mid-window loses the channel with
             # everything else rather than keeping a premium room for two more
@@ -558,19 +570,19 @@ class CougConnectBot(commands.Bot):
             has = role in member.roles
             if should_hold and not has:
                 try:
-                    await member.add_roles(role, reason="Three-year milestone: Silver channel access")
+                    await member.add_roles(role, reason=f"Loyalty milestone: {label}")
                     added += 1
                 except Exception as e:
-                    log.error(f"Silver Access grant failed for {discord_id}: {e}")
+                    log.error(f"{label} grant failed for {discord_id}: {e}")
             elif has and not should_hold:
                 try:
-                    await member.remove_roles(role, reason="Silver channel access window ended")
+                    await member.remove_roles(role, reason=f"{label} window ended")
                     removed += 1
                 except Exception as e:
-                    log.error(f"Silver Access removal failed for {discord_id}: {e}")
+                    log.error(f"{label} removal failed for {discord_id}: {e}")
 
         if added or removed:
-            log.info(f"Silver Access: +{added} -{removed}")
+            log.info(f"{label}: +{added} -{removed}")
 
     @tasks.loop(time=datetime.time(hour=15, minute=0, tzinfo=datetime.timezone.utc))  # ~9am MT
     async def milestone_task(self):
@@ -627,6 +639,7 @@ class CougConnectBot(commands.Bot):
                     log.error(f"first_paid store failed for {discord_id}: {e}")
 
         await self.sync_silver_access(targets)
+        await self.sync_gold_lounge(targets)
 
         announced = 0
         for discord_id, info in targets:
@@ -2282,11 +2295,18 @@ async def upgrade_cmd(interaction: discord.Interaction):
     log.info(f"/upgrade shown to discord_id={interaction.user.id} tier={tier} annual={annual}")
 
 
-@bot.tree.command(name="silver-access", description="Start your earned month in the Silver channel, or see what you have saved")
-async def silver_access_cmd(interaction: discord.Interaction):
+ACCESS_KINDS = {
+    "silver": {"room": "the Silver channel", "earned": "They're earned at three years with CougConnect.", "field": "silver_access_until"},
+    "gold": {"room": "the Gold Lounge", "earned": "Silver members earn them at three and four years with CougConnect.", "field": "gold_access_until"},
+}
+
+
+async def _access_command(interaction: discord.Interaction, kind: str):
+    """Show, and on a confirmed click spend, an earned month of access."""
+    k = ACCESS_KINDS[kind]
     await interaction.response.defer(ephemeral=True)
 
-    status, body = await wp_link.silver_access(interaction.user.id, check=True)
+    status, body = await wp_link.silver_access(interaction.user.id, check=True, kind=kind)
 
     if status == 0:
         await interaction.followup.send("⚠️ Couldn't reach the site just now. Nothing changed — try again in a minute.", ephemeral=True)
@@ -2304,12 +2324,12 @@ async def silver_access_cmd(interaction: discord.Interaction):
 
     if until:
         extra = f" You have **{passes}** more saved for another time." if passes else ""
-        await interaction.followup.send(f"You're in the Silver channel until **{until}**.{extra}", ephemeral=True)
+        await interaction.followup.send(f"You're in {k['room']} until **{until}**.{extra}", ephemeral=True)
         return
 
     if passes < 1:
         await interaction.followup.send(
-            "You don't have a Silver channel month saved right now. They're earned at three years with CougConnect.",
+            f"You don't have a month in {k['room']} saved right now. {k['earned']}",
             ephemeral=True,
         )
         return
@@ -2323,17 +2343,21 @@ async def silver_access_cmd(interaction: discord.Interaction):
         if click.user.id != interaction.user.id:
             await click.response.send_message("That isn't yours to spend.", ephemeral=True)
             return
-        st, bd = await wp_link.silver_access(click.user.id)
+        st, bd = await wp_link.silver_access(click.user.id, kind=kind)
         if st == 200:
             await click.response.edit_message(
-                content=f"Done — you're in the Silver channel until **{bd.get('until')}**. "
+                content=f"Done — you're in {k['room']} until **{bd.get('until')}**. "
                         f"It may take a minute for the channel to appear.",
                 view=None,
             )
             try:
-                await bot.sync_silver_access([(str(click.user.id), {"silver_access_until": bd.get("until") or "", "active": True})])
+                target = [(str(click.user.id), {k["field"]: bd.get("until") or "", "active": True})]
+                if kind == "gold":
+                    await bot.sync_gold_lounge(target)
+                else:
+                    await bot.sync_silver_access(target)
             except Exception as e:
-                log.error(f"immediate Silver Access role add failed for {click.user.id}: {e}")
+                log.error(f"immediate {kind} access role add failed for {click.user.id}: {e}")
         else:
             await click.response.edit_message(content=f"⚠️ {bd.get('message') or 'That did not go through. Nothing was used.'}", view=None)
 
@@ -2341,14 +2365,24 @@ async def silver_access_cmd(interaction: discord.Interaction):
     view.add_item(button)
 
     await interaction.followup.send(
-        f"You have **{passes}** month{'s' if passes != 1 else ''} in the Silver channel saved. "
+        f"You have **{passes}** month{'s' if passes != 1 else ''} in {k['room']} saved. "
         f"It doesn't expire, so there's no rush — start it when there's something worth being in there for.",
         view=view,
         ephemeral=True,
     )
 
 
-@bot.tree.command(name="sync-access", description="Reconcile Silver Access roles against WordPress now, without waiting for the daily pass")
+@bot.tree.command(name="silver-access", description="Start your earned month in the Silver channel, or see what you have saved")
+async def silver_access_cmd(interaction: discord.Interaction):
+    await _access_command(interaction, "silver")
+
+
+@bot.tree.command(name="gold-lounge", description="Start your earned month in the Gold Lounge, or see what you have saved")
+async def gold_lounge_cmd(interaction: discord.Interaction):
+    await _access_command(interaction, "gold")
+
+
+@bot.tree.command(name="sync-access", description="Reconcile Silver Access and Gold Lounge roles against WordPress now")
 @app_commands.default_permissions(administrator=True)
 async def sync_access(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -2366,13 +2400,18 @@ async def sync_access(interaction: discord.Interaction):
 
     targets = _milestone_targets(tenure)
     await bot.sync_silver_access(targets)
+    await bot.sync_gold_lounge(targets)
 
     holders = [m.display_name for m in interaction.guild.members
                if any(r.id == SILVER_ACCESS_ROLE_ID for r in m.roles)]
+    lounge = [m.display_name for m in interaction.guild.members
+              if any(r.id == GOLD_LOUNGE_ROLE_ID for r in m.roles)]
     await interaction.followup.send(
         f"✅ Reconciled against {len(targets)} linked members. "
         f"Silver Access is held by **{len(holders)}**"
-        + (": " + ", ".join(holders[:15]) if holders else "."),
+        + (": " + ", ".join(holders[:15]) if holders else "")
+        + f". Gold Lounge (earned) by **{len(lounge)}**"
+        + (": " + ", ".join(lounge[:15]) if lounge else "."),
         ephemeral=True,
     )
 
