@@ -38,6 +38,7 @@ import aggregator
 import database as db
 import mailchimp
 import memberpress as mp
+import ses_mail
 import wp_link
 
 load_dotenv()
@@ -70,10 +71,9 @@ CONNECT_REDIRECT_PATH = "/connect/callback"
 WEBHOOK_URL_TOKEN = os.getenv("WEBHOOK_URL_TOKEN", "")
 DISABLE_LEGACY_WEBHOOK = os.getenv("DISABLE_LEGACY_WEBHOOK", "") == "1"
 
-# Admin report emails (nightly DB backup + unverified-subscriber report).
-# From address must be a verified SendGrid sender.
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
-REPORT_EMAIL_FROM = os.getenv("REPORT_EMAIL_FROM", "")
+# Admin report emails (nightly DB backup + unverified-subscriber report), sent
+# through Amazon SES (ses_mail.py). From address must be on cougconnect.com.
+REPORT_EMAIL_FROM = os.getenv("REPORT_EMAIL_FROM", "admin@cougconnect.com")
 REPORT_EMAIL_TO = os.getenv("REPORT_EMAIL_TO", "eric@serdarconsulting.com")
 
 ROLE_IDS = {
@@ -450,7 +450,7 @@ class CougConnectBot(commands.Bot):
                 attachment_name=f"cougconnect-{stamp}.db",
             )
             if not sent:
-                await post_admin_log("❌ **Nightly DB backup email failed to send** — check SendGrid config/logs.")
+                await post_admin_log("❌ **Nightly DB backup email failed to send** — check SES config/logs.")
         except Exception as e:
             log.error(f"DB backup failed: {e}")
             await post_admin_log(f"❌ **Nightly DB backup failed:** `{e}`")
@@ -954,34 +954,13 @@ async def post_admin_log(message: str):
 
 
 async def send_report_email(subject: str, body_text: str, attachment_path: str | None = None, attachment_name: str | None = None) -> bool:
-    """Send an admin report email via SendGrid. Returns True on success."""
-    if not SENDGRID_API_KEY or not REPORT_EMAIL_FROM or not REPORT_EMAIL_TO:
-        log.error("Report email not sent — SENDGRID_API_KEY / REPORT_EMAIL_FROM / REPORT_EMAIL_TO not all configured.")
+    """Send an admin report email via SES. Returns True on success."""
+    if not ses_mail.configured() or not REPORT_EMAIL_FROM or not REPORT_EMAIL_TO:
+        log.error("Report email not sent — SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY / REPORT_EMAIL_FROM / REPORT_EMAIL_TO not all configured.")
         return False
-    payload = {
-        "personalizations": [{"to": [{"email": REPORT_EMAIL_TO}]}],
-        "from": {"email": REPORT_EMAIL_FROM, "name": "CougConnect Bot"},
-        "subject": subject,
-        "content": [{"type": "text/plain", "value": body_text}],
-    }
-    if attachment_path:
-        with open(attachment_path, "rb") as f:
-            payload["attachments"] = [{
-                "content": base64.b64encode(f.read()).decode(),
-                "filename": attachment_name or os.path.basename(attachment_path),
-                "type": "application/octet-stream",
-                "disposition": "attachment",
-            }]
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.sendgrid.com/v3/mail/send",
-                json=payload,
-                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}"},
-            ) as resp:
-                if resp.status >= 300:
-                    log.error(f"SendGrid error {resp.status}: {await resp.text()}")
-                    return False
+        await ses_mail.send_email(REPORT_EMAIL_FROM, "CougConnect Bot", REPORT_EMAIL_TO, subject, body_text,
+                                  attachment_path, attachment_name)
     except Exception as e:
         log.error(f"Report email failed: {e}")
         return False
