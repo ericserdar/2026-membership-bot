@@ -168,6 +168,8 @@ def build_embed(item: dict, source_cfg: dict) -> discord.Embed:
         timestamp=datetime.fromisoformat(item["published_at"]),
     )
     embed.set_author(name=source_cfg["name"])
+    if source_cfg["kind"] == "cougconnect" and item.get("summary"):
+        embed.description = item["summary"]  # the post's excerpt, so members see what it's about
     if item.get("thumbnail"):
         if source_cfg["kind"] == "video":
             embed.set_image(url=item["thumbnail"])
