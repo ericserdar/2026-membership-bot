@@ -32,6 +32,11 @@ MAX_AGE_DAYS = 3
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=30)
 USER_AGENT = "CougConnectBot/1.0 (+https://cougconnect.com)"
 ALERT_AFTER_FAILURES = 3
+
+# New CougConnect articles are also announced in a regular channel (with a
+# ping), because #byu-news buries them among ~40 outside items a day.
+ARTICLE_ANNOUNCE_CHANNEL_ID = int(os.getenv("DISCORD_ARTICLE_ANNOUNCE_CHANNEL_ID", "1050107287286579311"))  # #insiderinfo
+ARTICLE_ANNOUNCE_PING = os.getenv("ARTICLE_ANNOUNCE_PING", "@everyone").strip()  # "" = silent
 ALERT_COOLDOWN = timedelta(hours=24)
 
 KIND_DEFAULTS = {  # kind -> (emoji, embed color)
@@ -212,8 +217,9 @@ async def _kind_tag_id(channel, kind: str) -> int | None:
         return None
 
 
-async def send_item(session: aiohttp.ClientSession, channel, item: dict, source_cfg: dict):
+async def send_item(session: aiohttp.ClientSession, channel, item: dict, source_cfg: dict) -> int | None:
     """Post one item silently: a forum post in a forum channel, else a message.
+    Returns the forum thread id, if one was created.
 
     discord.py can't set SUPPRESS_NOTIFICATIONS on a forum starter message,
     so the forum path hits the REST endpoint directly.
@@ -239,9 +245,24 @@ async def send_item(session: aiohttp.ClientSession, channel, item: dict, source_
                     await asyncio.sleep(float(data.get("retry_after", 2)) + 0.5)
                     continue
                 resp.raise_for_status()
-                return
+                return int((await resp.json())["id"])
     else:
         await channel.send(embed=embed, silent=True)
+    return None
+
+
+async def announce_article(channel, item: dict, source_cfg: dict, thread_id: int | None):
+    """Announce a new CougConnect article, pinging per ARTICLE_ANNOUNCE_PING."""
+    lines = [f"{ARTICLE_ANNOUNCE_PING} New article just went up on CougConnect 👇".strip()]
+    if thread_id:
+        lines.append(f"💬 Discuss it in <#{thread_id}>")
+    ping = bool(ARTICLE_ANNOUNCE_PING)
+    await channel.send(
+        "\n".join(lines),
+        embed=build_embed(item, source_cfg),
+        allowed_mentions=discord.AllowedMentions(everyone=ping, roles=ping, users=False),
+        silent=not ping,
+    )
 
 
 async def _handle_feed_failure(source_cfg: dict, error: Exception, post_admin_log):
@@ -262,7 +283,7 @@ async def _handle_feed_failure(source_cfg: dict, error: Exception, post_admin_lo
 
 
 async def _process_source(session, channel, source_cfg: dict, post_admin_log,
-                          title_corpus: list[str]) -> int:
+                          title_corpus: list[str], announce_channel=None) -> int:
     """Poll one source. Returns the number of items silently backfilled."""
     src_id = source_cfg["id"]
     parsed = await fetch_feed(session, source_cfg["url"])
@@ -283,7 +304,8 @@ async def _process_source(session, channel, source_cfg: dict, post_admin_log,
                                      summary=item["summary"])
         if not is_new:
             continue
-        if is_duplicate_title(item["title"], title_corpus):
+        # Our own articles always go out, even if an outlet ran a similar headline.
+        if source_cfg["kind"] != "cougconnect" and is_duplicate_title(item["title"], title_corpus):
             db.mark_news_suppressed(src_id, item["guid"])
             log.info(f"Suppressed cross-source duplicate ({src_id}): {item['title'][:80]}")
             continue
@@ -292,11 +314,24 @@ async def _process_source(session, channel, source_cfg: dict, post_admin_log,
                 and datetime.fromisoformat(item["published_at"]) >= cutoff):
             to_post.append(item)
 
-    if channel is not None:
-        for item in reversed(to_post):  # oldest first, so the channel reads chronologically
-            await send_item(session, channel, item, source_cfg)
-            db.mark_news_posted(src_id, item["guid"])
-            await asyncio.sleep(1)
+    for item in reversed(to_post):  # oldest first, so the channel reads chronologically
+        thread_id = None
+        if channel is not None:
+            try:
+                thread_id = await send_item(session, channel, item, source_cfg)
+                db.mark_news_posted(src_id, item["guid"])
+            except Exception as e:
+                # Logged, not raised: one failed post must not block the announcement
+                # or the rest of the batch (the item is already stored, so no retry).
+                log.error(f"News post failed ({src_id}): {item['title'][:80]} — {e}")
+        if announce_channel is not None and source_cfg["kind"] == "cougconnect":
+            try:
+                await announce_article(announce_channel, item, source_cfg, thread_id)
+                log.info(f"Announced CougConnect article: {item['title'][:80]}")
+            except Exception as e:
+                log.error(f"Article announcement failed: {item['title'][:80]} — {e}")
+                await post_admin_log(f"⚠️ Couldn't announce new article **{item['title'][:150]}** in <#{announce_channel.id}>: `{e}`")
+        await asyncio.sleep(1)
 
     if _fail_counts.pop(src_id, 0) >= ALERT_AFTER_FAILURES:
         _last_alert.pop(src_id, None)
@@ -310,6 +345,7 @@ async def poll_feeds(bot, channel_id: int, post_admin_log):
     # No channel yet? Still fetch and store, so /news.json (the website feed)
     # works and sources get seeded — only the Discord posting waits.
     channel = bot.get_channel(channel_id) if channel_id else None
+    announce_channel = bot.get_channel(ARTICLE_ANNOUNCE_CHANNEL_ID) if ARTICLE_ANNOUNCE_CHANNEL_ID else None
     if channel is None and not _warned_no_channel:
         _warned_no_channel = True
         await post_admin_log(
@@ -328,7 +364,7 @@ async def poll_feeds(bot, channel_id: int, post_admin_log):
         for source_cfg in load_feeds():
             try:
                 backfilled += await _process_source(session, channel, source_cfg,
-                                                    post_admin_log, title_corpus)
+                                                    post_admin_log, title_corpus, announce_channel)
             except Exception as e:
                 await _handle_feed_failure(source_cfg, e, post_admin_log)
     if backfilled:
