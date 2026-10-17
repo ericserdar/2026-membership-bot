@@ -75,8 +75,10 @@ def _auth_headers(method: str, path: str, body: bytes) -> dict:
 
 
 async def send_email(from_addr: str, from_name: str, to_addr: str, subject: str, body_text: str,
-                     attachment_path: str | None = None, attachment_name: str | None = None) -> str:
-    """Send one plain-text email, optionally with a file attached. Returns the SES MessageId.
+                     attachment_path: str | None = None, attachment_name: str | None = None,
+                     body_html: str | None = None) -> str:
+    """Send one email (plain text, plus an HTML part if given), optionally with a file attached.
+    Returns the SES MessageId.
 
     Raises SESError on any failure. SES caps a raw message at 40 MB including the
     base64 overhead, so attachments over ~29 MB will be refused.
@@ -89,6 +91,8 @@ async def send_email(from_addr: str, from_name: str, to_addr: str, subject: str,
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg.set_content(body_text)
+    if body_html:
+        msg.add_alternative(body_html, subtype="html")
     if attachment_path:
         with open(attachment_path, "rb") as f:
             msg.add_attachment(f.read(), maintype="application", subtype="octet-stream",

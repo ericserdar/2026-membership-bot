@@ -205,6 +205,17 @@ def init_db():
                 completed_at  TEXT
             )
         """)
+        # sponsor_watch: one row per (subscription, kind) alert already handled.
+        # seeded=1 rows were true when the watch was first armed and never alerted.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sponsor_notices (
+                sub_id   INTEGER,
+                kind     TEXT,
+                seeded   INTEGER DEFAULT 0,
+                sent_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (sub_id, kind)
+            )
+        """)
         # unlinked_members grew columns so the funnel can tell "never verified"
         # from "verified later" without deleting the signup history.
         for col_decl in ("email TEXT", "registered_at TEXT", "verified_at TEXT"):
@@ -940,4 +951,24 @@ def complete_jersey_form(message_id: str, address: str, claim_id: int | None):
             "UPDATE jersey_forms SET completed_at = ?, address = ?, claim_id = COALESCE(?, claim_id) WHERE message_id = ?",
             (datetime.utcnow().isoformat(), address, claim_id, message_id),
         )
+        conn.commit()
+
+
+# ── Sponsor watch ─────────────────────────────────────────────────────────────
+
+def sponsor_notices() -> set[tuple[int, str]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        return {(r[0], r[1]) for r in conn.execute("SELECT sub_id, kind FROM sponsor_notices")}
+
+
+def record_sponsor_notice(sub_id: int, kind: str, seeded: bool = False):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR IGNORE INTO sponsor_notices (sub_id, kind, seeded) VALUES (?, ?, ?)",
+                     (sub_id, kind, 1 if seeded else 0))
+        conn.commit()
+
+
+def forget_sponsor_notice(sub_id: int, kind: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM sponsor_notices WHERE sub_id = ? AND kind = ?", (sub_id, kind))
         conn.commit()

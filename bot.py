@@ -39,6 +39,7 @@ import database as db
 import mailchimp
 import memberpress as mp
 import ses_mail
+import sponsor_watch
 import wp_link
 
 load_dotenv()
@@ -134,6 +135,10 @@ MILESTONE_BATCH_NOTICE = int(os.getenv("MILESTONE_BATCH_NOTICE", "25"))
 # first sync can move many roles at once, so preview with /tier-sync-preview
 # before turning it on.
 TIER_SYNC_INCLUDE_WP_LINKED = os.getenv("TIER_SYNC_INCLUDE_WP_LINKED", "").strip().lower() in ("1", "true", "yes", "on")
+
+# Sponsor watch (sponsor_watch.py): alerts to the admin log + report email are
+# always on. SPONSOR_INTAKE_EMAIL=1 also emails each new sponsor the intake form.
+SPONSOR_INTAKE_EMAIL = os.getenv("SPONSOR_INTAKE_EMAIL", "").strip().lower() in ("1", "true", "yes", "on")
 
 UPGRADE_NUDGE_DAYS = 152  # ~5 months as a member before the Insider upgrade nudge
 UPGRADE_NUDGE_DAILY_CAP = 50  # spread large cohorts over multiple days
@@ -272,6 +277,7 @@ class CougConnectBot(commands.Bot):
         self.weekly_digest_task.start()
         self.news_task.start()
         self.onboarding_drip_task.start()
+        self.sponsor_watch_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -921,6 +927,16 @@ class CougConnectBot(commands.Bot):
     async def before_onboarding_drip(self):
         await self.wait_until_ready()
 
+    @tasks.loop(time=datetime.time(hour=15, minute=30, tzinfo=datetime.timezone.utc))  # ~9:30am MT
+    async def sponsor_watch_task(self):
+        """Daily backstop for sponsor alerts — catches missed webhooks and silent lapses."""
+        await run_sponsor_watch("daily")
+
+    @sponsor_watch_task.before_loop
+    async def before_sponsor_watch(self):
+        await self.wait_until_ready()
+        await run_sponsor_watch("startup")  # arms the watch on first deploy; a no-op after that
+
     @tasks.loop(minutes=20)
     async def news_task(self):
         """Poll BYU content feeds and post new items to #byu-news."""
@@ -965,6 +981,80 @@ async def send_report_email(subject: str, body_text: str, attachment_path: str |
         log.error(f"Report email failed: {e}")
         return False
     return True
+
+
+# ── Sponsor watch ─────────────────────────────────────────────────────────────
+
+_sponsor_watch_lock = asyncio.Lock()
+_sponsor_watch_pending = False
+
+
+async def run_sponsor_watch(reason: str) -> list[str]:
+    """Sweep sponsor subscriptions and act on anything new. Returns one line per action."""
+    async with _sponsor_watch_lock:
+        try:
+            subs = await sponsor_watch.fetch_sponsor_subs()
+        except Exception as e:
+            log.error(f"Sponsor watch ({reason}): MemberPress fetch failed — {e}")
+            return [f"⚠️ MemberPress fetch failed: {e}"]
+
+        conditions = sponsor_watch.evaluate(subs)
+        seen = db.sponsor_notices()
+        if not seen:
+            # First run: everything already true is history, not news. Record it
+            # silently so arming the watch doesn't email past sponsors or Eric.
+            for kind, s in conditions:
+                db.record_sponsor_notice(s["id"], sponsor_watch.notice_key(kind, s), seeded=True)
+            msg = (f"🛡️ Sponsor watch armed — tracking {len(subs)} sponsor subscription(s); "
+                   f"{len(conditions)} existing condition(s) recorded without alerts.")
+            await post_admin_log(msg)
+            return [msg]
+
+        done = []
+        for kind, s in conditions:
+            key = sponsor_watch.notice_key(kind, s)
+            if (s["id"], key) in seen:
+                continue
+            # Record before acting: a send that times out may still have gone
+            # out, and a repeat intake email is worse than a missing one.
+            db.record_sponsor_notice(s["id"], key)
+            intake_sent = None
+            if kind == "welcome" and SPONSOR_INTAKE_EMAIL and not sponsor_watch.returning(s, subs):
+                intake_sent = await send_sponsor_intake(s)
+            subject, body = sponsor_watch.admin_message(kind, s, subs, intake_sent)
+            await post_admin_log(f"**{subject}**\n{body[:1800]}")
+            await send_report_email(f"[CougConnect] {subject}", body)
+            log.info(f"Sponsor watch ({reason}): {kind} sub={s['id']} {s['email']}")
+            done.append(f"{kind}: {s['name'] or s['email']} (sub {s['id']})")
+        return done
+
+
+async def send_sponsor_intake(s: dict) -> bool:
+    if not ses_mail.configured() or not s.get("email"):
+        log.error(f"Sponsor intake not sent for sub {s['id']} — SES not configured or no email")
+        return False
+    subject, text, body_html = sponsor_watch.intake_email(s)
+    try:
+        await ses_mail.send_email(REPORT_EMAIL_FROM, "CougConnect", s["email"], subject, text, body_html=body_html)
+    except Exception as e:
+        log.error(f"Sponsor intake email to {s['email']} failed: {e}")
+        return False
+    return True
+
+
+async def _sponsor_watch_soon(event: str):
+    """Run the sweep shortly after a sponsor webhook (MemberPress commits late), and once more later."""
+    global _sponsor_watch_pending
+    if _sponsor_watch_pending:
+        return  # a burst of webhooks for one checkout → one sweep
+    _sponsor_watch_pending = True
+    try:
+        await asyncio.sleep(90)
+    finally:
+        _sponsor_watch_pending = False
+    await run_sponsor_watch(f"webhook:{event}")
+    await asyncio.sleep(600)
+    await run_sponsor_watch(f"webhook:{event}:recheck")
 
 
 # ── Onboarding helpers ────────────────────────────────────────────────────────
@@ -2395,6 +2485,28 @@ async def sync_access(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="sponsor-watch", description="Show sponsor subscriptions and run the sponsor alert check now")
+@app_commands.default_permissions(administrator=True)
+async def sponsor_watch_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    actions = await run_sponsor_watch("manual")
+    try:
+        subs = await sponsor_watch.fetch_sponsor_subs()
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ MemberPress fetch failed: {e}", ephemeral=True)
+        return
+    lines = [f"`{s['id']}` {s['name'] or s['email']} — {sponsor_watch.tier_name(s['membership_id'])}, "
+             f"{s['status']}, paid through {s['paid_through'].strftime('%b %-d') if s['paid_through'] else '—'}"
+             for s in sorted(subs, key=lambda s: s["status"] != "active")
+             if s["has_payment"]]
+    await interaction.followup.send(
+        ("**Actions this run:**\n" + "\n".join(actions) if actions else "No new sponsor alerts.")
+        + f"\nIntake email to new sponsors: **{'ON' if SPONSOR_INTAKE_EMAIL else 'OFF'}**\n\n"
+        + "\n".join(lines)[:1700],
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="lookup-email", description="Find which Discord account is linked to an email address")
 @app_commands.describe(email="The CougConnect email to look up")
 @app_commands.default_permissions(manage_roles=True)
@@ -3491,6 +3603,11 @@ async def handle_webhook(request: web.Request) -> web.Response:
     if not member_data and data.get("type") == "member":
         member_data = payload  # member-* events carry the member object itself
     mp_member_id = member_data.get("id") or payload.get("member_id")
+
+    # Sponsors are rarely linked to Discord, so check them before the
+    # unlinked-member early return below.
+    if sponsor_watch.membership_id_of(payload) in sponsor_watch.SPONSOR_MEMBERSHIP_IDS:
+        asyncio.create_task(_sponsor_watch_soon(event))
 
     if not mp_member_id:
         return web.json_response({"status": "ignored — no member_id"})
