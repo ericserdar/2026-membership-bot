@@ -290,6 +290,7 @@ class CougConnectBot(commands.Bot):
         self.mood_slowmode_restore_task.start()
         self.taskboard_watchdog_task.start()
         self.automod_digest_task.start()
+        self.automod_expire_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -1028,6 +1029,31 @@ class CougConnectBot(commands.Bot):
 
     @news_task.before_loop
     async def before_news(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(hours=1)
+    async def automod_expire_task(self):
+        """Clear AutoMod cards nobody handled in AUTOMOD_CARD_EXPIRE_H hours. Counted as 'expired', never graded."""
+        if automod.CARD_EXPIRE_H <= 0:
+            return
+        channel = self.get_channel(MOD_LOG_CHANNEL_ID)
+        if channel is None:
+            return
+        for row in db.get_stale_automod_cards(automod.CARD_EXPIRE_H):
+            try:
+                await channel.get_partial_message(int(row["card_message_id"])).delete()
+            except discord.NotFound:
+                pass
+            except (discord.Forbidden, discord.HTTPException) as e:
+                log.error(f"automod: couldn't clear stale card for flag #{row['id']}: {e}")
+                continue
+            db.set_flag_status(row["id"], "shadow_expired" if row["status"] == "shadow" else "expired")
+            db.log_automod_action(row["id"], "expired", str(self.user.id), "AutoMod (no one handled it)",
+                                  f"{automod.CARD_EXPIRE_H:g}h")
+            await asyncio.sleep(1)
+
+    @automod_expire_task.before_loop
+    async def before_automod_expire(self):
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc))  # 9am MST / 10am MDT
@@ -2092,8 +2118,47 @@ async def _automod_timeout(interaction: discord.Interaction, minutes: int):
                                     allowed_mentions=discord.AllowedMentions.none())
 
 
+AUTOMOD_WARN_DM = (
+    "Hey, quick note from the CougConnect mods about your message in **#{channel}**. "
+    "Criticism of the team is always welcome here; just keep it about the play, not the people. "
+    "Thanks for being part of the community. 💙"
+)
+
+
+async def _automod_warn(interaction: discord.Interaction):
+    """DM the author a friendly heads-up. Nothing is removed; the card stays open."""
+    if not await _automod_mod_only(interaction):
+        return
+    flag_id = _automod_flag_id(interaction)
+    row = db.get_flag(flag_id) if flag_id else None
+    if not row:
+        await interaction.response.send_message("Couldn't find the record for this entry.", ephemeral=True)
+        return
+    embed = interaction.message.embeds[0]
+    if any(f.name == "Warned" for f in embed.fields):
+        await interaction.response.send_message("They were already warned for this message.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    sent = await _dm_member(int(row["author_id"]), AUTOMOD_WARN_DM.format(channel=row["channel_name"]),
+                            what="automod warning", ignore_dry_run=True)
+    _automod_audit(interaction, flag_id, "warned", "DM sent" if sent else "DM failed (DMs closed?)")
+    when = discord.utils.format_dt(discord.utils.utcnow(), "R")
+    embed.add_field(name="Warned", value=(f"⚠️ by {interaction.user.mention} {when}" if sent else
+                                          f"⚠️ by {interaction.user.mention} {when}, but the DM didn't go through (DMs closed?)"),
+                    inline=False)
+    await interaction.message.edit(embed=embed)
+    await interaction.followup.send("Warning sent." if sent else "Couldn't DM them; they may have DMs off.", ephemeral=True)
+
+
 def _add_timeout_buttons(view: discord.ui.View, prefix: str):
-    """Second row of every AutoMod card: ⏱️ 10 min / ⏱️ 1 hr. custom_ids are per view so persistence works."""
+    """Second row of every AutoMod card: ⚠️ Warn, ⏱️ 10 min, ⏱️ 1 hr. custom_ids are per view so persistence works."""
+    warn = discord.ui.Button(label="Warn", emoji="⚠️", style=discord.ButtonStyle.secondary,
+                             custom_id=f"automod_{prefix}_warn", row=1)
+
+    async def warn_cb(interaction: discord.Interaction):
+        await _automod_warn(interaction)
+    warn.callback = warn_cb
+    view.add_item(warn)
     for minutes, label in ((10, "10 min"), (60, "1 hr")):
         btn = discord.ui.Button(label=f"Timeout {label}", emoji="⏱️", style=discord.ButtonStyle.secondary,
                                 custom_id=f"automod_{prefix}_to{minutes}", row=1)
@@ -2242,6 +2307,21 @@ def _automod_remember(message_id: int, content: str):
         _automod_checked.popitem(last=False)
 
 
+async def _automod_reply_target(message: discord.Message) -> tuple[str, str] | None:
+    """(author, text) of the message this one replies to, so the classifier knows who's being answered."""
+    ref = message.reference
+    if ref is None or ref.message_id is None:
+        return None
+    target = ref.resolved if isinstance(ref.resolved, discord.Message) else None
+    if target is None:
+        try:
+            target = await message.channel.fetch_message(ref.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+    text = target.content or ("(" + ", ".join(a.filename for a in target.attachments) + ")" if target.attachments else "")
+    return (target.author.display_name, text) if text else None
+
+
 async def _automod_check(message: discord.Message, edited_from: str | None = None):
     """edited_from is set when this is a re-check after an edit ("" = original text unknown)."""
     _automod_remember(message.id, message.content)
@@ -2254,8 +2334,9 @@ async def _automod_check(message: discord.Message, edited_from: str | None = Non
             context.reverse()
         except (discord.Forbidden, discord.HTTPException):
             context = []
+        reply_to = await _automod_reply_target(message)
         result = await automod.classify(
-            message.content, message.author.display_name, getattr(message.channel, "name", "?"), context,
+            message.content, message.author.display_name, getattr(message.channel, "name", "?"), context, reply_to,
         )
     # Edits don't feed the mood monitor: the message was already counted once.
     if result and automod.MOOD_ENABLED and edited_from is None:
@@ -2318,13 +2399,15 @@ async def _mood_act(channel: discord.TextChannel, hit: dict):
 
 
 def _history_line(h: dict) -> str:
-    if not (h["automod"] or h["manual"] or h["timeouts"]):
+    if not (h["automod"] or h["manual"] or h["timeouts"] or h.get("warnings")):
         return "First flag. Nothing else in the last 30 days."
     parts = [f"**{h['automod']}** earlier AutoMod flag{'s' if h['automod'] != 1 else ''}"]
     if h["automod"]:
         parts.append(f"{h['confirmed']} confirmed by mods · {h['false_alarms']} false alarm{'s' if h['false_alarms'] != 1 else ''}")
     if h["manual"]:
         parts.append(f"🚩 {h['manual']} member flag{'s' if h['manual'] != 1 else ''}")
+    if h.get("warnings"):
+        parts.append(f"⚠️ {h['warnings']} warning{'s' if h['warnings'] != 1 else ''}")
     if h["timeouts"]:
         parts.append(f"⏱️ {h['timeouts']} timeout{'s' if h['timeouts'] != 1 else ''}")
     return " · ".join(parts)
@@ -2409,7 +2492,8 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     log_channel = bot.get_channel(MOD_LOG_CHANNEL_ID)
     if log_channel:
         try:
-            await log_channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+            card = await log_channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+            db.set_flag_card(flag_id, str(card.id))
         except Exception as e:
             log.error(f"automod: failed to post mod log for flag_id={flag_id}: {e}")
     log.info(f"automod: {'live' if live else 'shadow'} {verdict} message {message.id} in #{getattr(channel, 'name', '?')} (flag_id={flag_id})")
@@ -3562,13 +3646,13 @@ async def automod_stats(interaction: discord.Interaction, days: int = 7):
     ), inline=False)
     graded_ok, graded_wrong = n(status="shadow_ok"), n(status="shadow_wrong")
     graded = graded_ok + graded_wrong
-    shadow_statuses = ("shadow", "shadow_ok", "shadow_wrong", "shadow_ignored")
+    shadow_statuses = ("shadow", "shadow_ok", "shadow_wrong", "shadow_ignored", "shadow_expired")
     embed.add_field(name="Shadow", value=(
         f"Would remove: **{sum(n('remove', st) for st in shadow_statuses)}** · "
         f"would review: **{sum(n('review', st) for st in shadow_statuses)}**\n"
         f"Mods graded {graded}: 👍 good flag {graded_ok} · 👎 false alarm {graded_wrong}"
         + (f" (**{round(100 * graded_ok / graded)}%** good)" if graded else "")
-        + f" · 🙈 ignored {n(status='shadow_ignored')} · ungraded {n(status='shadow')}"
+        + f" · 🙈 ignored {n(status='shadow_ignored')} · ⌛ expired {n(status='shadow_expired')} · ungraded {n(status='shadow')}"
     ), inline=False)
     moods = db.count_mood_events(days=days)
     embed.add_field(name="Mood monitor", value=(
@@ -3605,18 +3689,21 @@ def _automod_digest_embed(days: int = 7) -> discord.Embed:
     graded = good + wrong
     ignored = n(status="shadow_ignored") + n(status="ignored")
     waiting = n(status="shadow") + n(status="open")
+    expired = n(status="shadow_expired") + n(status="expired")
     rate = f" → **{round(100 * good / graded)}%** good" if graded else ""
     embed.add_field(name="How the flags held up", value=(
         f"👍 {good} good · 👎 {wrong} false alarm{'s' if wrong != 1 else ''}{rate}\n"
-        f"🙈 {ignored} ignored · ⏳ {waiting} never handled"
+        f"🙈 {ignored} ignored · ⌛ {expired} expired unhandled · ⏳ {waiting} waiting"
     ), inline=False)
 
     by_mod: dict[str, dict] = {}
     for actor_id, _name, action, count in db.get_automod_action_counts(days):
+        if action == "expired":
+            continue
         by_mod.setdefault(actor_id, {})[action] = count
     if by_mod:
         icons = {"good_flag": "👍", "false_alarm": "👎", "ignored": "🙈", "removed": "🗑️",
-                 "dismissed": "✅", "restored": "↩️", "timeout": "⏱️"}
+                 "dismissed": "✅", "restored": "↩️", "timeout": "⏱️", "warned": "⚠️", "expired": "⌛"}
         lines = []
         for actor_id, acts in sorted(by_mod.items(), key=lambda kv: -sum(kv[1].values()))[:10]:
             lines.append(f"<@{actor_id}>: **{sum(acts.values())}** · " +
@@ -3661,6 +3748,7 @@ async def automod_digest(interaction: discord.Interaction, days: int = 7):
 _AUDIT_LABELS = {
     "good_flag": "👍 Good flag", "false_alarm": "👎 False alarm", "ignored": "🙈 Ignored",
     "removed": "🗑️ Removed", "dismissed": "✅ Dismissed", "restored": "↩️ Restored", "timeout": "⏱️ Timeout",
+    "warned": "⚠️ Warned", "expired": "⌛ Expired (no one handled it)",
 }
 
 

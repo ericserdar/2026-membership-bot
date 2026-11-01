@@ -115,7 +115,8 @@ def init_db():
         """)
         # AutoMod columns: source = "manual" (🚩 reaction) or "automod";
         # verdict = remove/review; status = open/removed/dismissed/overturned/shadow.
-        for col_decl in ("source TEXT DEFAULT 'manual'", "verdict TEXT", "status TEXT", "category TEXT"):
+        for col_decl in ("source TEXT DEFAULT 'manual'", "verdict TEXT", "status TEXT", "category TEXT",
+                         "card_message_id TEXT"):
             try:
                 conn.execute(f"ALTER TABLE flagged_messages ADD COLUMN {col_decl}")
             except sqlite3.OperationalError:
@@ -734,6 +735,10 @@ def get_author_flag_history(author_id: str, days: int = 30) -> dict:
             "SELECT COALESCE(source, 'manual'), COALESCE(status, '') FROM flagged_messages "
             "WHERE author_id = ? AND flagged_at >= ?", (author_id, since),
         ).fetchall()
+        warnings = conn.execute(
+            "SELECT COUNT(*) FROM automod_actions a JOIN flagged_messages f ON f.id = a.flag_id "
+            "WHERE f.author_id = ? AND a.action = 'warned' AND a.acted_at >= ?", (author_id, since),
+        ).fetchone()[0]
         timeouts = conn.execute(
             "SELECT COUNT(*) FROM automod_actions a JOIN flagged_messages f ON f.id = a.flag_id "
             "WHERE f.author_id = ? AND a.action LIKE 'timeout%' AND a.acted_at >= ?", (author_id, since),
@@ -745,7 +750,25 @@ def get_author_flag_history(author_id: str, days: int = 30) -> dict:
         "false_alarms": sum(st in ("shadow_wrong", "dismissed", "overturned") for st in auto),
         "manual": sum(src != "automod" for src, _ in rows),
         "timeouts": timeouts,
+        "warnings": warnings,
     }
+
+
+def set_flag_card(flag_id: int, card_message_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE flagged_messages SET card_message_id = ? WHERE id = ?", (card_message_id, flag_id))
+        conn.commit()
+
+
+def get_stale_automod_cards(hours: float) -> list[dict]:
+    """AutoMod cards nobody handled within `hours` (still shadow/open, card still posted)."""
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(
+            "SELECT id, status, card_message_id FROM flagged_messages WHERE source = 'automod' "
+            "AND status IN ('shadow', 'open') AND card_message_id IS NOT NULL AND flagged_at < ?", (cutoff,),
+        ).fetchall()]
 
 
 def get_automod_action_counts(days: int = 7) -> list[tuple[str, str, str, int]]:
