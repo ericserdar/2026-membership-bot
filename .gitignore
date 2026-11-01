@@ -9,3 +9,4 @@ ops/*.state.json
 ops/game-thread-holders.json
 ops/onboarding-backup.json
 ops/archive-*.txt
+ops/automod_backtest-*.csv

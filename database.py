@@ -113,6 +113,13 @@ def init_db():
                 flagged_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # AutoMod columns: source = "manual" (🚩 reaction) or "automod";
+        # verdict = remove/review; status = open/removed/dismissed/overturned/shadow.
+        for col_decl in ("source TEXT DEFAULT 'manual'", "verdict TEXT", "status TEXT", "category TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE flagged_messages ADD COLUMN {col_decl}")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS news_items (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -640,12 +647,16 @@ def get_stats() -> dict:
 
 def log_flagged_message(message_id: str, channel_id: str, channel_name: str,
                         author_id: str, author_name: str, content: str,
-                        flagger_id: str, flagger_name: str) -> int:
+                        flagger_id: str, flagger_name: str, source: str = "manual",
+                        verdict: str | None = None, status: str | None = None,
+                        reason: str | None = None, category: str | None = None) -> int:
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.execute(
-            "INSERT INTO flagged_messages (message_id, channel_id, channel_name, author_id, author_name, content, flagger_id, flagger_name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (message_id, channel_id, channel_name, author_id, author_name, content, flagger_id, flagger_name),
+            "INSERT INTO flagged_messages (message_id, channel_id, channel_name, author_id, author_name, content, "
+            "flagger_id, flagger_name, source, verdict, status, reason, category) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (message_id, channel_id, channel_name, author_id, author_name, content, flagger_id, flagger_name,
+             source, verdict, status, reason, category),
         )
         conn.commit()
         return cur.lastrowid
@@ -657,11 +668,183 @@ def set_flag_reason(flag_id: int, reason: str):
         conn.commit()
 
 
+def set_flag_status(flag_id: int, status: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE flagged_messages SET status = ? WHERE id = ?", (status, flag_id))
+        conn.commit()
+
+
+def get_flag(flag_id: int) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM flagged_messages WHERE id = ?", (flag_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def count_recent_flags_for_author(author_id: str, days: int = 7) -> int:
+    """Flags that actually counted against the author: manual 🚩 flags and confirmed AutoMod removals."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM flagged_messages WHERE author_id = ? AND flagged_at >= ? "
+            "AND COALESCE(status, 'removed') = 'removed'",
+            (author_id, since),
+        ).fetchone()[0]
+
+
+def get_automod_stats(days: int = 7) -> dict:
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT verdict, COALESCE(status, ''), COUNT(*) FROM flagged_messages "
+            "WHERE source = 'automod' AND flagged_at >= ? GROUP BY verdict, status",
+            (since,),
+        ).fetchall()
+        cats = conn.execute(
+            "SELECT COALESCE(category, '?'), COUNT(*) FROM flagged_messages "
+            "WHERE source = 'automod' AND flagged_at >= ? GROUP BY category ORDER BY 2 DESC",
+            (since,),
+        ).fetchall()
+    return {"by_verdict_status": [(v, s, n) for v, s, n in rows], "by_category": cats}
+
+
+# ── AutoMod API spend ─────────────────────────────────────────────────────────
+
+def _init_automod_spend(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS automod_spend (
+            day    TEXT PRIMARY KEY,   -- YYYY-MM-DD (UTC)
+            calls  INTEGER DEFAULT 0,
+            cost   REAL DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS automod_budget_alerts (
+            month  TEXT,               -- YYYY-MM
+            level  TEXT,               -- "warn" / "over"
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (month, level)
+        )
+    """)
+
+
+def add_automod_spend(cost: float) -> float:
+    """Record one call; return month-to-date spend (UTC calendar month)."""
+    now = datetime.utcnow()
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_spend(conn)
+        conn.execute(
+            "INSERT INTO automod_spend (day, calls, cost) VALUES (?, 1, ?) "
+            "ON CONFLICT(day) DO UPDATE SET calls = calls + 1, cost = cost + excluded.cost",
+            (now.strftime("%Y-%m-%d"), cost),
+        )
+        conn.commit()
+        return conn.execute(
+            "SELECT COALESCE(SUM(cost), 0) FROM automod_spend WHERE day LIKE ?", (now.strftime("%Y-%m") + "%",)
+        ).fetchone()[0]
+
+
+def get_automod_spend(month: str | None = None) -> dict:
+    month = month or datetime.utcnow().strftime("%Y-%m")
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_spend(conn)
+        cost, calls = conn.execute(
+            "SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(calls), 0) FROM automod_spend WHERE day LIKE ?",
+            (month + "%",),
+        ).fetchone()
+    return {"month": month, "cost": cost, "calls": calls}
+
+
+def claim_automod_budget_alert(month: str, level: str) -> bool:
+    """True the first time (month, level) is claimed, so each alert fires once."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_spend(conn)
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO automod_budget_alerts (month, level) VALUES (?, ?)", (month, level)
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+# ── Channel mood monitor ──────────────────────────────────────────────────────
+
+def _init_mood(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mood_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id   TEXT,
+            channel_name TEXT,
+            mode         TEXT,      -- shadow / live
+            messages     INTEGER,
+            negative     INTEGER,
+            pct          INTEGER,
+            triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # One pending slowmode restore per channel; survives bot restarts.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mood_slowmode (
+            channel_id  TEXT PRIMARY KEY,
+            prev_delay  INTEGER,
+            restore_at  TEXT          -- ISO UTC
+        )
+    """)
+
+
+def log_mood_event(channel_id: str, channel_name: str, mode: str, messages: int, negative: int, pct: int) -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_mood(conn)
+        cur = conn.execute(
+            "INSERT INTO mood_events (channel_id, channel_name, mode, messages, negative, pct) VALUES (?, ?, ?, ?, ?, ?)",
+            (channel_id, channel_name, mode, messages, negative, pct),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def count_mood_events(days: int = 7) -> dict:
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_mood(conn)
+        rows = conn.execute(
+            "SELECT mode, COUNT(*) FROM mood_events WHERE triggered_at >= ? GROUP BY mode", (since,)
+        ).fetchall()
+    return dict(rows)
+
+
+def schedule_slowmode_restore(channel_id: str, prev_delay: int, restore_at: datetime):
+    """Keeps the ORIGINAL delay if a restore is already pending (don't 'restore' to our own slowmode)."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_mood(conn)
+        conn.execute(
+            "INSERT INTO mood_slowmode (channel_id, prev_delay, restore_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(channel_id) DO UPDATE SET restore_at = excluded.restore_at",
+            (channel_id, prev_delay, restore_at.isoformat()),
+        )
+        conn.commit()
+
+
+def due_slowmode_restores() -> list[tuple[str, int]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_mood(conn)
+        return conn.execute(
+            "SELECT channel_id, prev_delay FROM mood_slowmode WHERE restore_at <= ?",
+            (datetime.utcnow().isoformat(),),
+        ).fetchall()
+
+
+def clear_slowmode_restore(channel_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_mood(conn)
+        conn.execute("DELETE FROM mood_slowmode WHERE channel_id = ?", (channel_id,))
+        conn.commit()
+
+
 def get_flagged_messages(limit: int = 20) -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT id, channel_name, author_id, author_name, content, flagger_name, reason, flagged_at "
-            "FROM flagged_messages ORDER BY flagged_at DESC LIMIT ?",
+            "FROM flagged_messages WHERE COALESCE(status, 'removed') = 'removed' ORDER BY flagged_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [
@@ -674,19 +857,20 @@ def get_flagged_messages(limit: int = 20) -> list[dict]:
 def count_flags_for_author(author_id: str) -> int:
     with sqlite3.connect(DB_PATH) as conn:
         return conn.execute(
-            "SELECT COUNT(*) FROM flagged_messages WHERE author_id = ?", (author_id,)
+            "SELECT COUNT(*) FROM flagged_messages WHERE author_id = ? AND COALESCE(status, 'removed') = 'removed'", (author_id,)
         ).fetchone()[0]
 
 
 def get_flag_totals(top: int = 15) -> dict:
     with sqlite3.connect(DB_PATH) as conn:
-        total = conn.execute("SELECT COUNT(*) FROM flagged_messages").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM flagged_messages WHERE COALESCE(status, 'removed') = 'removed'").fetchone()[0]
         last30 = conn.execute(
-            "SELECT COUNT(*) FROM flagged_messages WHERE flagged_at >= ?",
+            "SELECT COUNT(*) FROM flagged_messages WHERE flagged_at >= ? AND COALESCE(status, 'removed') = 'removed'",
             ((datetime.utcnow() - timedelta(days=30)).isoformat(sep=" "),),
         ).fetchone()[0]
         rows = conn.execute(
             "SELECT author_id, author_name, COUNT(*) as n FROM flagged_messages "
+            "WHERE COALESCE(status, 'removed') = 'removed' "
             "GROUP BY author_id ORDER BY n DESC, MAX(flagged_at) DESC LIMIT ?",
             (top,),
         ).fetchall()

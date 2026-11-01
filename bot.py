@@ -35,6 +35,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 import aggregator
+import automod
 import database as db
 import mailchimp
 import memberpress as mp
@@ -262,6 +263,9 @@ class CougConnectBot(commands.Bot):
         self.add_view(VerifyView())
         self.add_view(ReSyncView())
         self.add_view(FlagReasonView())
+        self.add_view(AutoModRemovedView())
+        self.add_view(AutoModReviewView())
+        self.add_view(AutoModShadowView())
         self.add_view(JerseyFormView())
         await self.tree.sync()
         log.info("Slash commands synced.")
@@ -278,6 +282,7 @@ class CougConnectBot(commands.Bot):
         self.news_task.start()
         self.onboarding_drip_task.start()
         self.sponsor_watch_task.start()
+        self.mood_slowmode_restore_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -936,6 +941,27 @@ class CougConnectBot(commands.Bot):
     async def before_sponsor_watch(self):
         await self.wait_until_ready()
         await run_sponsor_watch("startup")  # arms the watch on first deploy; a no-op after that
+
+    @tasks.loop(minutes=1)
+    async def mood_slowmode_restore_task(self):
+        """Put slowmode back the way it was once the mood monitor's window ends."""
+        try:
+            for channel_id, prev_delay in db.due_slowmode_restores():
+                channel = self.get_channel(int(channel_id))
+                if isinstance(channel, discord.TextChannel):
+                    try:
+                        await channel.edit(slowmode_delay=prev_delay, reason="Mood monitor: slowmode window ended")
+                        log.info(f"mood: restored slowmode={prev_delay}s in #{channel.name}")
+                    except (discord.Forbidden, discord.HTTPException) as e:
+                        log.error(f"mood: couldn't restore slowmode in {channel_id}: {e}")
+                        continue
+                db.clear_slowmode_restore(channel_id)
+        except Exception as e:
+            log.error(f"mood: restore loop failed: {e}")
+
+    @mood_slowmode_restore_task.before_loop
+    async def _before_mood_restore(self):
+        await self.wait_until_ready()
 
     @tasks.loop(minutes=20)
     async def news_task(self):
@@ -1823,6 +1849,348 @@ class FlagReasonView(discord.ui.View):
         await interaction.response.send_modal(FlagReasonModal(flag_id, interaction.message))
 
 
+# ── AutoMod (AI tone moderation in selected channels) ─────────────────────────
+# automod.py decides allow/review/remove; this section acts on it. In "log"
+# (shadow) mode nothing is deleted and nobody is DMed — mods just see what the
+# bot WOULD have done and mark it right/wrong so the rubric can be tuned.
+
+_automod_sem = asyncio.Semaphore(4)
+
+
+def _automod_record_spend(cost: float, usage):
+    """automod.on_usage hook: log spend; fire the budget alert once per level per month."""
+    month_total = db.add_automod_spend(cost)
+    budget = automod.MONTHLY_BUDGET_USD
+    if budget <= 0:
+        return
+    month = dt.now(timezone.utc).strftime("%Y-%m")
+    if month_total >= budget:
+        level = "over"
+    elif month_total >= budget * automod.WARN_PCT / 100:
+        level = "warn"
+    else:
+        return
+    if db.claim_automod_budget_alert(month, level):
+        asyncio.create_task(_automod_budget_alert(level, month_total, budget))
+
+
+async def _automod_budget_alert(level: str, spent: float, budget: float):
+    spend = db.get_automod_spend()
+    day = dt.now(timezone.utc).day
+    projected = spent / day * 30 if day else spent
+    head = ("🚨 **AutoMod is over its monthly API budget**" if level == "over"
+            else f"⚠️ **AutoMod has used {round(100 * spent / budget)}% of its monthly API budget**")
+    body = (
+        f"Month-to-date: **${spent:.2f}** of ${budget:.2f} ({spend['calls']:,} checks, "
+        f"model `{automod.MODEL}`). On pace for about **${projected:.2f}** this month.\n"
+        "AutoMod keeps running; nothing was turned off. To stop it, set `AUTOMOD_ENABLED=0` on Railway. "
+        "To change the budget, set `AUTOMOD_MONTHLY_BUDGET_USD`."
+    )
+    await post_admin_log(f"{head}\n{body}")
+    try:
+        await send_report_email(
+            f"CougConnect AutoMod: API spend {'over' if level == 'over' else 'nearing'} ${budget:.0f}/month",
+            f"{head.replace('*', '')}\n\n{body.replace('*', '').replace('`', '')}\n",
+        )
+    except Exception as e:
+        log.error(f"automod: budget alert email failed: {e}")
+
+
+automod.on_usage = _automod_record_spend
+
+AUTOMOD_MOD_REMOVED_DM = (
+    "Hey, a moderator removed your message in **#{channel}** because it crossed from criticism "
+    "into going after people. Criticism of the team is always welcome here; personal attacks aren't."
+)
+
+_CATEGORY_LABELS = {
+    "personal_attack": "Personal attack", "athlete_attack": "Attack on an athlete",
+    "member_attack": "Attack on a member", "trolling": "Trolling / baiting",
+    "doom_spiral": "Doom-spiral", "pile_on": "Pile-on", "harassment": "Harassment",
+    "borderline": "Borderline", "none": "—",
+}
+
+
+def _automod_applies(message: discord.Message) -> bool:
+    if not automod.ENABLED or message.guild is None or message.guild.id != GUILD_ID:
+        return False
+    if message.author.bot or message.webhook_id or not message.content:
+        return False
+    ch = message.channel
+    if ch.id not in automod.CHANNEL_IDS and getattr(ch, "parent_id", None) not in automod.CHANNEL_IDS:
+        return False
+    # Mods/admins are exempt.
+    if isinstance(message.author, discord.Member) and ch.permissions_for(message.author).manage_messages:
+        return False
+    return automod.worth_checking(message.content)
+
+
+def _automod_flag_id(interaction: discord.Interaction) -> int | None:
+    try:
+        return int(interaction.message.embeds[0].footer.text.split("#")[1].split()[0])
+    except (IndexError, ValueError, AttributeError):
+        return None
+
+
+async def _automod_mod_only(interaction: discord.Interaction) -> bool:
+    perms = getattr(interaction.user, "guild_permissions", None)
+    if perms and perms.manage_messages:
+        return True
+    await interaction.response.send_message("Mods only.", ephemeral=True)
+    return False
+
+
+async def _automod_close_log(interaction: discord.Interaction, note: str):
+    embed = interaction.message.embeds[0]
+    embed.add_field(name="Resolved", value=f"{note} by {interaction.user.mention}", inline=False)
+    embed.color = discord.Color.dark_grey()
+    await interaction.message.edit(embed=embed, view=None)
+
+
+async def _automod_delete(row: dict) -> str:
+    """Delete the original message. Returns a short status for the log."""
+    channel = bot.get_channel(int(row["channel_id"]))
+    if channel is None:
+        return "channel not found"
+    try:
+        msg = await channel.fetch_message(int(row["message_id"]))
+        await msg.delete()
+        return "deleted"
+    except discord.NotFound:
+        return "already gone"
+    except discord.Forbidden:
+        return "missing Manage Messages permission"
+
+
+async def _automod_dm(author_id: int, text: str, content: str):
+    quoted = "\n".join("> " + line for line in content[:400].splitlines() or [""])
+    await _dm_member(author_id, f"{text}\n\nYour message:\n{quoted}", what="automod DM", ignore_dry_run=True)
+
+
+class AutoModRemovedView(discord.ui.View):
+    """On a live removal: let a mod undo it."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Restore", style=discord.ButtonStyle.secondary, emoji="↩️", custom_id="automod_restore")
+    async def restore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _automod_mod_only(interaction):
+            return
+        flag_id = _automod_flag_id(interaction)
+        row = db.get_flag(flag_id) if flag_id else None
+        if not row:
+            await interaction.response.send_message("Couldn't find the record for this entry.", ephemeral=True)
+            return
+        channel = bot.get_channel(int(row["channel_id"]))
+        if channel is None:
+            await interaction.response.send_message("Original channel not found.", ephemeral=True)
+            return
+        author = bot.get_user(int(row["author_id"]))
+        embed = discord.Embed(description=row["content"][:4000], color=discord.Color.blurple())
+        embed.set_author(name=f"{row['author_name']} (restored)",
+                         icon_url=author.display_avatar.url if author else None)
+        embed.set_footer(text="This message was removed by mistake and has been restored.")
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        db.set_flag_status(flag_id, "overturned")
+        await _automod_close_log(interaction, "↩️ Restored")
+        await interaction.response.send_message("Restored.", ephemeral=True)
+
+
+class AutoModReviewView(discord.ui.View):
+    """Borderline (message still up): mod removes or dismisses."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Remove", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="automod_review_remove")
+    async def remove(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _automod_mod_only(interaction):
+            return
+        flag_id = _automod_flag_id(interaction)
+        row = db.get_flag(flag_id) if flag_id else None
+        if not row:
+            await interaction.response.send_message("Couldn't find the record for this entry.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        result = await _automod_delete(row)
+        if result in ("deleted", "already gone"):
+            db.set_flag_status(flag_id, "removed")
+        if result == "deleted":
+            await _automod_dm(int(row["author_id"]), AUTOMOD_MOD_REMOVED_DM.format(channel=row["channel_name"]), row["content"])
+        await _automod_close_log(interaction, f"🗑️ Removed ({result})")
+        await interaction.followup.send(f"Message {result}.", ephemeral=True)
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary, emoji="✅", custom_id="automod_review_dismiss")
+    async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _automod_mod_only(interaction):
+            return
+        flag_id = _automod_flag_id(interaction)
+        if flag_id:
+            db.set_flag_status(flag_id, "dismissed")
+        await _automod_close_log(interaction, "✅ Dismissed (fine as-is)")
+        await interaction.response.send_message("Dismissed.", ephemeral=True)
+
+
+class AutoModShadowView(discord.ui.View):
+    """Shadow mode: nothing happened; mods grade the call so we can tune it."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _grade(self, interaction: discord.Interaction, status: str, note: str):
+        if not await _automod_mod_only(interaction):
+            return
+        flag_id = _automod_flag_id(interaction)
+        if flag_id:
+            db.set_flag_status(flag_id, status)
+        await _automod_close_log(interaction, note)
+        await interaction.response.send_message("Thanks, noted.", ephemeral=True)
+
+    @discord.ui.button(label="Right call", style=discord.ButtonStyle.success, emoji="👍", custom_id="automod_shadow_ok")
+    async def ok(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._grade(interaction, "shadow_ok", "👍 Right call")
+
+    @discord.ui.button(label="Wrong call", style=discord.ButtonStyle.secondary, emoji="👎", custom_id="automod_shadow_wrong")
+    async def wrong(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._grade(interaction, "shadow_wrong", "👎 Wrong call")
+
+
+async def _automod_check(message: discord.Message):
+    async with _automod_sem:
+        try:
+            context = []
+            async for m in message.channel.history(limit=5, before=message):
+                if m.content:
+                    context.append((m.author.display_name, m.content))
+            context.reverse()
+        except (discord.Forbidden, discord.HTTPException):
+            context = []
+        result = await automod.classify(
+            message.content, message.author.display_name, getattr(message.channel, "name", "?"), context,
+        )
+    if result and automod.MOOD_ENABLED:
+        target = message.channel if isinstance(message.channel, discord.TextChannel) else getattr(message.channel, "parent", None)
+        if isinstance(target, discord.TextChannel):
+            hit = _mood_tracker.record(target.id, message.created_at.timestamp(), result.get("tone"))
+            if hit:
+                asyncio.create_task(_mood_act(target, hit))
+    if not result or result["verdict"] == "allow":
+        return
+    await _automod_act(message, result)
+
+
+_mood_tracker = automod.MoodTracker()
+
+
+async def _mood_act(channel: discord.TextChannel, hit: dict):
+    live = automod.MOOD_MODE == "live"
+    db.log_mood_event(str(channel.id), channel.name, "live" if live else "shadow", hit["messages"], hit["negative"], hit["pct"])
+    stats = (f"{hit['pct']}% of the last {hit['messages']} messages in {int(automod.MOOD_WINDOW_MIN)} min were frustrated "
+             f"or hostile ({hit['hostile']} hostile).")
+    reminder = secrets.choice(automod.MOOD_REMINDERS)
+    did = []
+    if live:
+        try:
+            await channel.send(reminder, silent=True, allowed_mentions=discord.AllowedMentions.none())
+            did.append("posted reminder")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            did.append(f"⚠️ couldn't post reminder ({e})")
+        if automod.MOOD_SLOWMODE_S and channel.slowmode_delay < automod.MOOD_SLOWMODE_S:
+            try:
+                prev = channel.slowmode_delay
+                await channel.edit(slowmode_delay=automod.MOOD_SLOWMODE_S, reason="Mood monitor: channel heating up")
+                db.schedule_slowmode_restore(
+                    str(channel.id), prev,
+                    dt.now(timezone.utc).replace(tzinfo=None) + datetime.timedelta(minutes=automod.MOOD_SLOWMODE_MIN),
+                )
+                did.append(f"slowmode {automod.MOOD_SLOWMODE_S}s for {int(automod.MOOD_SLOWMODE_MIN)} min")
+            except discord.Forbidden:
+                did.append("⚠️ couldn't set slowmode (bot needs **Manage Channel** here)")
+            except discord.HTTPException as e:
+                did.append(f"⚠️ slowmode failed ({e})")
+    embed = discord.Embed(
+        title=("🌡️ Mood monitor: channel heating up" if live else "[SHADOW] 🌡️ Mood monitor would step in"),
+        description=stats, color=discord.Color.orange() if live else discord.Color.light_grey(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Channel", value=channel.mention, inline=True)
+    embed.add_field(name="Action", value=", ".join(did) if live else
+                    f"Would post a reminder + {automod.MOOD_SLOWMODE_S}s slowmode for {int(automod.MOOD_SLOWMODE_MIN)} min", inline=True)
+    embed.add_field(name="Reminder text", value=reminder[:1024], inline=False)
+    embed.set_footer(text=f"Won't fire again in this channel for {int(automod.MOOD_COOLDOWN_MIN)} min")
+    log_channel = bot.get_channel(MOD_LOG_CHANNEL_ID)
+    if log_channel:
+        try:
+            await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            log.error(f"mood: failed to post mod log: {e}")
+    log.info(f"mood: {'live' if live else 'shadow'} trigger in #{channel.name}: {stats}")
+
+
+async def _automod_act(message: discord.Message, result: dict):
+    verdict, live = result["verdict"], automod.MODE == "live"
+    channel = message.channel
+    attachments = ", ".join(a.url for a in message.attachments)
+    content = message.content + (f"\n[attachments: {attachments}]" if attachments else "")
+    status = ("removed" if verdict == "remove" else "open") if live else "shadow"
+    flag_id = db.log_flagged_message(
+        str(message.id), str(channel.id), getattr(channel, "name", "?"),
+        str(message.author.id), str(message.author), content,
+        str(bot.user.id), "AutoMod (AI)",
+        source="automod", verdict=verdict, status=status,
+        reason=result.get("reason"), category=result.get("category"),
+    )
+
+    if verdict == "remove":
+        title, color = "🤖 AutoMod Removed", discord.Color.red()
+    else:
+        title, color = "🤖 AutoMod Review: still up, needs a look", discord.Color.orange()
+    if not live:
+        title = f"[SHADOW] 🤖 Would {'remove' if verdict == 'remove' else 'flag for review'}"
+        color = discord.Color.light_grey()
+
+    embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
+    embed.add_field(name="Author", value=f"{message.author.mention} ({message.author})", inline=True)
+    embed.add_field(name="Channel", value=f"{channel.mention} · [jump]({message.jump_url})", inline=True)
+    embed.add_field(name="Category", value=_CATEGORY_LABELS.get(result.get("category"), result.get("category") or "—"), inline=True)
+    embed.add_field(name="Why", value=(result.get("reason") or "—")[:1024], inline=False)
+    embed.add_field(name="Content", value=(message.content or "(no text)")[:1024], inline=False)
+    if attachments:
+        embed.add_field(name="Attachments", value=attachments[:1024], inline=False)
+
+    note = None
+    if live and verdict == "remove":
+        try:
+            await message.delete()
+        except discord.Forbidden:
+            note = "⚠️ Couldn't delete: missing **Manage Messages** in this channel."
+            db.set_flag_status(flag_id, "open")
+        except discord.NotFound:
+            pass
+        else:
+            dm_text = (result.get("dm_text") or "").strip() or AUTOMOD_MOD_REMOVED_DM.format(channel=getattr(channel, "name", "?"))
+            await _automod_dm(message.author.id, dm_text, message.content)
+        recent = db.count_recent_flags_for_author(str(message.author.id), days=7)
+        if recent >= 3:
+            embed.add_field(name="⚠️ Repeat", value=f"{recent} removals in the last 7 days. Mods may want a timeout.", inline=False)
+    if note:
+        embed.add_field(name="Problem", value=note, inline=False)
+    embed.set_footer(text=f"AutoMod #{flag_id} · {automod.MODEL}")
+
+    if not live:
+        view = AutoModShadowView()
+    elif verdict == "remove" and not note:
+        view = AutoModRemovedView()
+    else:
+        view = AutoModReviewView()
+
+    log_channel = bot.get_channel(MOD_LOG_CHANNEL_ID)
+    if log_channel:
+        try:
+            await log_channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            log.error(f"automod: failed to post mod log for flag_id={flag_id}: {e}")
+    log.info(f"automod: {'live' if live else 'shadow'} {verdict} message {message.id} in #{getattr(channel, 'name', '?')} (flag_id={flag_id})")
+
+
 # ── Jersey form (admin sends via /send-jersey-form, member fills it in a DM) ──
 
 # Only used to register the persistent view at startup. The DM itself is built
@@ -2019,6 +2387,9 @@ async def on_message(message: discord.Message):
     # so a human actually sees them. Guild messages pass straight through.
     if message.guild is None and not message.author.bot and message.content:
         await post_admin_log(f"💬 **DM reply from** <@{message.author.id}> ({message.author}): {message.content[:1500]}")
+    elif _automod_applies(message):
+        # Background task: the classifier call must never delay command handling.
+        asyncio.create_task(_automod_check(message))
     await bot.process_commands(message)
 
 
@@ -2914,6 +3285,53 @@ async def flag_stats(interaction: discord.Interaction):
             for i, a in enumerate(stats["by_author"], 1)
         ]
         embed.add_field(name="By Author", value="\n".join(lines)[:1024], inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="automod-stats", description="What AutoMod has flagged lately, and how often mods disagreed")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(days="Look-back window in days (default 7)")
+async def automod_stats(interaction: discord.Interaction, days: int = 7):
+    days = max(1, min(days, 90))
+    stats = db.get_automod_stats(days=days)
+    rows = stats["by_verdict_status"]
+    total = sum(n for _, _, n in rows)
+    def n(verdict=None, status=None):
+        return sum(c for v, s, c in rows if (verdict is None or v == verdict) and (status is None or s == status))
+    mode = "LIVE" if automod.MODE == "live" else "SHADOW (log only)"
+    embed = discord.Embed(
+        title="🤖 AutoMod Stats",
+        description=(f"Mode: **{mode}** · {'enabled' if automod.ENABLED else '**disabled**'} · `{automod.MODEL}`\n"
+                     f"**{total}** flagged in the last {days} day{'s' if days != 1 else ''}"),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Live", value=(
+        f"Removed: **{n('remove', 'removed') + n('remove', 'overturned')}** "
+        f"(restored by mods: **{n(status='overturned')}**)\n"
+        f"Review: **{n('review', 'open')}** open · **{n('review', 'removed')}** removed · **{n(status='dismissed')}** dismissed"
+    ), inline=False)
+    graded_ok, graded_wrong = n(status="shadow_ok"), n(status="shadow_wrong")
+    graded = graded_ok + graded_wrong
+    embed.add_field(name="Shadow", value=(
+        f"Would remove: **{n('remove', 'shadow') + n('remove', 'shadow_ok') + n('remove', 'shadow_wrong')}** · "
+        f"would review: **{n('review', 'shadow') + n('review', 'shadow_ok') + n('review', 'shadow_wrong')}**\n"
+        f"Mods graded {graded}: 👍 {graded_ok} · 👎 {graded_wrong}"
+        + (f" (**{round(100 * graded_ok / graded)}%** right)" if graded else "")
+    ), inline=False)
+    moods = db.count_mood_events(days=days)
+    embed.add_field(name="Mood monitor", value=(
+        f"{'enabled' if automod.MOOD_ENABLED else 'disabled'} · mode **{automod.MOOD_MODE}** · "
+        f"stepped in **{moods.get('live', 0)}**x live, **{moods.get('shadow', 0)}**x shadow"
+    ), inline=False)
+    spend = db.get_automod_spend()
+    day = dt.now(timezone.utc).day
+    embed.add_field(name="API spend (this month, UTC)", value=(
+        f"**${spend['cost']:.2f}** of ${automod.MONTHLY_BUDGET_USD:.2f} budget · {spend['calls']:,} checks · "
+        f"on pace for ~${spend['cost'] / day * 30:.2f}"
+    ), inline=False)
+    if stats["by_category"]:
+        embed.add_field(name="By category", value="\n".join(
+            f"{_CATEGORY_LABELS.get(c, c)}: **{k}**" for c, k in stats["by_category"])[:1024], inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
