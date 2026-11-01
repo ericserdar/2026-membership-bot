@@ -681,6 +681,50 @@ def get_flag(flag_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+# ── AutoMod mod actions (audit log: who pressed which button) ────────────────
+
+def _init_automod_actions(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS automod_actions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            flag_id     INTEGER,
+            action      TEXT,      -- good_flag / false_alarm / ignored / removed / dismissed / restored
+            actor_id    TEXT,
+            actor_name  TEXT,
+            detail      TEXT,
+            acted_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+def log_automod_action(flag_id: int | None, action: str, actor_id: str, actor_name: str, detail: str | None = None):
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_actions(conn)
+        conn.execute(
+            "INSERT INTO automod_actions (flag_id, action, actor_id, actor_name, detail) VALUES (?, ?, ?, ?, ?)",
+            (flag_id, action, actor_id, actor_name, detail),
+        )
+        conn.commit()
+
+
+def get_automod_actions(days: int = 7, actor_id: str | None = None, limit: int = 25) -> list[dict]:
+    """Newest first, joined to the flag so the audit shows whose message it was."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    sql = ("SELECT a.*, f.author_id, f.author_name, f.channel_name, f.content, f.verdict "
+           "FROM automod_actions a LEFT JOIN flagged_messages f ON f.id = a.flag_id "
+           "WHERE a.acted_at >= ?")
+    args: list = [since]
+    if actor_id:
+        sql += " AND a.actor_id = ?"
+        args.append(actor_id)
+    sql += " ORDER BY a.id DESC LIMIT ?"
+    args.append(limit)
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_actions(conn)
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+
 def count_recent_flags_for_author(author_id: str, days: int = 7) -> int:
     """Flags that actually counted against the author: manual 🚩 flags and confirmed AutoMod removals."""
     since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")

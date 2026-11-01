@@ -1979,11 +1979,38 @@ async def _automod_mod_only(interaction: discord.Interaction) -> bool:
     return False
 
 
+def _automod_audit(interaction: discord.Interaction, flag_id: int | None, action: str, detail: str | None = None):
+    """Record which mod pressed which AutoMod button. Never let a logging failure break the button."""
+    try:
+        db.log_automod_action(flag_id, action, str(interaction.user.id), str(interaction.user), detail)
+    except Exception as e:
+        log.error(f"automod: audit log failed for flag_id={flag_id} action={action}: {e}")
+    log.info(f"automod audit: {interaction.user} ({interaction.user.id}) -> {action} on flag #{flag_id}")
+
+
 async def _automod_close_log(interaction: discord.Interaction, note: str):
+    """Mark the card resolved: who/when, greyed out, buttons removed so it can't be pressed twice."""
     embed = interaction.message.embeds[0]
-    embed.add_field(name="Resolved", value=f"{note} by {interaction.user.mention}", inline=False)
+    embed.remove_field(next((i for i, f in enumerate(embed.fields) if f.name == "How to grade"), len(embed.fields)))
+    when = discord.utils.format_dt(discord.utils.utcnow(), "R")
+    embed.add_field(name="Resolved", value=f"{note} by {interaction.user.mention} {when}", inline=False)
     embed.color = discord.Color.dark_grey()
     await interaction.message.edit(embed=embed, view=None)
+
+
+async def _automod_ignore(interaction: discord.Interaction, status: str | None):
+    """Delete the card from the mod channel. No reply, no DM, nothing posted; only the audit log keeps it."""
+    if not await _automod_mod_only(interaction):
+        return
+    flag_id = _automod_flag_id(interaction)
+    if flag_id and status:
+        db.set_flag_status(flag_id, status)
+    _automod_audit(interaction, flag_id, "ignored")
+    await interaction.response.defer()
+    try:
+        await interaction.message.delete()
+    except discord.NotFound:
+        pass
 
 
 async def _automod_delete(row: dict) -> str:
@@ -2031,8 +2058,13 @@ class AutoModRemovedView(discord.ui.View):
         embed.set_footer(text="This message was removed by mistake and has been restored.")
         await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         db.set_flag_status(flag_id, "overturned")
+        _automod_audit(interaction, flag_id, "restored")
         await _automod_close_log(interaction, "↩️ Restored")
         await interaction.response.send_message("Restored.", ephemeral=True)
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, emoji="🙈", custom_id="automod_removed_ignore")
+    async def ignore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _automod_ignore(interaction, None)  # removal stands; just clear the card
 
 
 class AutoModReviewView(discord.ui.View):
@@ -2055,6 +2087,7 @@ class AutoModReviewView(discord.ui.View):
             db.set_flag_status(flag_id, "removed")
         if result == "deleted":
             await _automod_dm(int(row["author_id"]), AUTOMOD_MOD_REMOVED_DM.format(channel=row["channel_name"]), row["content"])
+        _automod_audit(interaction, flag_id, "removed", result)
         await _automod_close_log(interaction, f"🗑️ Removed ({result})")
         await interaction.followup.send(f"Message {result}.", ephemeral=True)
 
@@ -2065,8 +2098,13 @@ class AutoModReviewView(discord.ui.View):
         flag_id = _automod_flag_id(interaction)
         if flag_id:
             db.set_flag_status(flag_id, "dismissed")
+        _automod_audit(interaction, flag_id, "dismissed")
         await _automod_close_log(interaction, "✅ Dismissed (fine as-is)")
         await interaction.response.send_message("Dismissed.", ephemeral=True)
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, emoji="🙈", custom_id="automod_review_ignore")
+    async def ignore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _automod_ignore(interaction, "ignored")
 
 
 class AutoModShadowView(discord.ui.View):
@@ -2074,22 +2112,28 @@ class AutoModShadowView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def _grade(self, interaction: discord.Interaction, status: str, note: str):
+    async def _grade(self, interaction: discord.Interaction, status: str, action: str, note: str):
         if not await _automod_mod_only(interaction):
             return
         flag_id = _automod_flag_id(interaction)
         if flag_id:
             db.set_flag_status(flag_id, status)
+        _automod_audit(interaction, flag_id, action)
         await _automod_close_log(interaction, note)
         await interaction.response.send_message("Thanks, noted.", ephemeral=True)
 
-    @discord.ui.button(label="Right call", style=discord.ButtonStyle.success, emoji="👍", custom_id="automod_shadow_ok")
+    # custom_ids kept from the old "Right call / Wrong call" buttons so cards already posted still work.
+    @discord.ui.button(label="Good flag", style=discord.ButtonStyle.success, emoji="👍", custom_id="automod_shadow_ok")
     async def ok(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._grade(interaction, "shadow_ok", "👍 Right call")
+        await self._grade(interaction, "shadow_ok", "good_flag", "👍 Good flag")
 
-    @discord.ui.button(label="Wrong call", style=discord.ButtonStyle.secondary, emoji="👎", custom_id="automod_shadow_wrong")
+    @discord.ui.button(label="False alarm", style=discord.ButtonStyle.secondary, emoji="👎", custom_id="automod_shadow_wrong")
     async def wrong(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._grade(interaction, "shadow_wrong", "👎 Wrong call")
+        await self._grade(interaction, "shadow_wrong", "false_alarm", "👎 False alarm")
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, emoji="🙈", custom_id="automod_shadow_ignore")
+    async def ignore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _automod_ignore(interaction, "shadow_ignored")
 
 
 async def _automod_check(message: discord.Message):
@@ -2212,6 +2256,13 @@ async def _automod_act(message: discord.Message, result: dict):
             embed.add_field(name="⚠️ Repeat", value=f"{recent} removals in the last 7 days. Mods may want a timeout.", inline=False)
     if note:
         embed.add_field(name="Problem", value=note, inline=False)
+    if not live:
+        good = "you'd have removed it too" if verdict == "remove" else "worth a mod's look"
+        bad = "it should stay up" if verdict == "remove" else "it's fine, shouldn't have been flagged"
+        embed.add_field(name="How to grade", value=(
+            f"👍 **Good flag**: {good}\n👎 **False alarm**: {bad}\n"
+            "🙈 **Ignore**: delete this card without grading (still in `/automod-audit`)"
+        ), inline=False)
     embed.set_footer(text=f"AutoMod #{flag_id} · {automod.MODEL}")
 
     if not live:
@@ -3347,15 +3398,17 @@ async def automod_stats(interaction: discord.Interaction, days: int = 7):
     embed.add_field(name="Live", value=(
         f"Removed: **{n('remove', 'removed') + n('remove', 'overturned')}** "
         f"(restored by mods: **{n(status='overturned')}**)\n"
-        f"Review: **{n('review', 'open')}** open · **{n('review', 'removed')}** removed · **{n(status='dismissed')}** dismissed"
+        f"Review: **{n('review', 'open')}** open · **{n('review', 'removed')}** removed · **{n(status='dismissed')}** dismissed · **{n(status='ignored')}** ignored"
     ), inline=False)
     graded_ok, graded_wrong = n(status="shadow_ok"), n(status="shadow_wrong")
     graded = graded_ok + graded_wrong
+    shadow_statuses = ("shadow", "shadow_ok", "shadow_wrong", "shadow_ignored")
     embed.add_field(name="Shadow", value=(
-        f"Would remove: **{n('remove', 'shadow') + n('remove', 'shadow_ok') + n('remove', 'shadow_wrong')}** · "
-        f"would review: **{n('review', 'shadow') + n('review', 'shadow_ok') + n('review', 'shadow_wrong')}**\n"
-        f"Mods graded {graded}: 👍 {graded_ok} · 👎 {graded_wrong}"
-        + (f" (**{round(100 * graded_ok / graded)}%** right)" if graded else "")
+        f"Would remove: **{sum(n('remove', st) for st in shadow_statuses)}** · "
+        f"would review: **{sum(n('review', st) for st in shadow_statuses)}**\n"
+        f"Mods graded {graded}: 👍 good flag {graded_ok} · 👎 false alarm {graded_wrong}"
+        + (f" (**{round(100 * graded_ok / graded)}%** good)" if graded else "")
+        + f" · 🙈 ignored {n(status='shadow_ignored')} · ungraded {n(status='shadow')}"
     ), inline=False)
     moods = db.count_mood_events(days=days)
     embed.add_field(name="Mood monitor", value=(
@@ -3372,6 +3425,47 @@ async def automod_stats(interaction: discord.Interaction, days: int = 7):
         embed.add_field(name="By category", value="\n".join(
             f"{_CATEGORY_LABELS.get(c, c)}: **{k}**" for c, k in stats["by_category"])[:1024], inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+_AUDIT_LABELS = {
+    "good_flag": "👍 Good flag", "false_alarm": "👎 False alarm", "ignored": "🙈 Ignored",
+    "removed": "🗑️ Removed", "dismissed": "✅ Dismissed", "restored": "↩️ Restored",
+}
+
+
+@bot.tree.command(name="automod-audit", description="Which mod pressed which AutoMod button")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(days="Look-back window in days (default 7)", mod="Only show this mod's actions")
+async def automod_audit(interaction: discord.Interaction, days: int = 7, mod: discord.Member | None = None):
+    days = max(1, min(days, 90))
+    rows = db.get_automod_actions(days=days, actor_id=str(mod.id) if mod else None, limit=25)
+    who = f" by {mod.display_name}" if mod else ""
+    embed = discord.Embed(title=f"🧾 AutoMod Audit Log{who}", color=discord.Color.blurple())
+    if not rows:
+        embed.description = f"No AutoMod button presses{who} in the last {days} day{'s' if days != 1 else ''}."
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    lines = []
+    for r in rows:
+        try:
+            ts = discord.utils.format_dt(dt.fromisoformat(r["acted_at"]).replace(tzinfo=timezone.utc), "f")
+        except (TypeError, ValueError):
+            ts = r["acted_at"] or "?"
+        snippet = (r.get("content") or "").replace("\n", " ")
+        snippet = discord.utils.escape_markdown(snippet[:80] + ("…" if len(snippet) > 80 else ""))
+        detail = f" ({r['detail']})" if r.get("detail") else ""
+        lines.append(
+            f"{ts} <@{r['actor_id']}> **{_AUDIT_LABELS.get(r['action'], r['action'])}**{detail} · #{r['flag_id']} "
+            f"<@{r['author_id']}> in #{r.get('channel_name') or '?'}\n> {snippet or '(no text)'}"
+        )
+    desc = ""
+    for line in lines:
+        if len(desc) + len(line) + 2 > 4000:
+            break
+        desc += line + "\n\n"
+    embed.description = desc
+    embed.set_footer(text=f"Newest {len(rows)} in the last {days} day{'s' if days != 1 else ''} · up to 25 shown")
+    await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.tree.command(name="tier-history", description="Show recent tier changes")
