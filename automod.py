@@ -33,6 +33,8 @@ CHANNEL_IDS = {
 }
 MIN_WORDS = int(os.getenv("AUTOMOD_MIN_WORDS", "4"))
 TIMEOUT_S = float(os.getenv("AUTOMOD_TIMEOUT_S", "10"))
+# Re-check a message when its text is edited (closes "post something mild, then edit it").
+CHECK_EDITS = os.getenv("AUTOMOD_CHECK_EDITS", "1").strip().lower() in ("1", "true", "yes", "on")
 
 VERDICTS = ("allow", "review", "remove")
 

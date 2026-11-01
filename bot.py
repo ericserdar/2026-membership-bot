@@ -11,6 +11,7 @@ CougConnect Discord Membership Bot
 
 import asyncio
 import base64
+import collections
 from collections import Counter
 import hashlib
 import hmac
@@ -484,7 +485,9 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=9, minute=0, tzinfo=datetime.timezone.utc))  # 2am MST (UTC-7)
     async def backup_db_task(self):
-        """Nightly SQLite backup emailed to the admin (not posted to Discord)."""
+        """Weekly (Sunday) SQLite backup emailed to the admin (not posted to Discord)."""
+        if dt.now(timezone.utc).weekday() != 6:  # loop fires daily; only Sunday sends
+            return
         backup_path = "/tmp/cougconnect-backup.db"
         try:
             src = sqlite3.connect(db.DB_PATH)
@@ -494,8 +497,8 @@ class CougConnectBot(commands.Bot):
             src.close()
             stamp = dt.now(timezone.utc).strftime("%Y-%m-%d")
             sent = await send_report_email(
-                subject=f"CougConnect nightly database backup — {stamp}",
-                body_text=f"Attached is the nightly SQLite backup for {stamp}.",
+                subject=f"CougConnect weekly database backup — {stamp}",
+                body_text=f"Attached is the weekly SQLite backup for {stamp}.",
                 attachment_path=backup_path,
                 attachment_name=f"cougconnect-{stamp}.db",
             )
@@ -2136,7 +2139,21 @@ class AutoModShadowView(discord.ui.View):
         await _automod_ignore(interaction, "shadow_ignored")
 
 
-async def _automod_check(message: discord.Message):
+# message_id -> text we last classified. Lets the edit handler skip edits that
+# didn't change the text (link unfurls, pins) even after the cache drops the message.
+_automod_checked: "collections.OrderedDict[int, str]" = collections.OrderedDict()
+
+
+def _automod_remember(message_id: int, content: str):
+    _automod_checked[message_id] = content
+    _automod_checked.move_to_end(message_id)
+    while len(_automod_checked) > 5000:
+        _automod_checked.popitem(last=False)
+
+
+async def _automod_check(message: discord.Message, edited_from: str | None = None):
+    """edited_from is set when this is a re-check after an edit ("" = original text unknown)."""
+    _automod_remember(message.id, message.content)
     async with _automod_sem:
         try:
             context = []
@@ -2149,7 +2166,8 @@ async def _automod_check(message: discord.Message):
         result = await automod.classify(
             message.content, message.author.display_name, getattr(message.channel, "name", "?"), context,
         )
-    if result and automod.MOOD_ENABLED:
+    # Edits don't feed the mood monitor: the message was already counted once.
+    if result and automod.MOOD_ENABLED and edited_from is None:
         target = message.channel if isinstance(message.channel, discord.TextChannel) else getattr(message.channel, "parent", None)
         if isinstance(target, discord.TextChannel):
             hit = _mood_tracker.record(target.id, message.created_at.timestamp(), result.get("tone"))
@@ -2157,7 +2175,7 @@ async def _automod_check(message: discord.Message):
                 asyncio.create_task(_mood_act(target, hit))
     if not result or result["verdict"] == "allow":
         return
-    await _automod_act(message, result)
+    await _automod_act(message, result, edited_from)
 
 
 _mood_tracker = automod.MoodTracker()
@@ -2208,7 +2226,7 @@ async def _mood_act(channel: discord.TextChannel, hit: dict):
     log.info(f"mood: {'live' if live else 'shadow'} trigger in #{channel.name}: {stats}")
 
 
-async def _automod_act(message: discord.Message, result: dict):
+async def _automod_act(message: discord.Message, result: dict, edited_from: str | None = None):
     verdict, live = result["verdict"], automod.MODE == "live"
     channel = message.channel
     attachments = ", ".join(a.url for a in message.attachments)
@@ -2229,13 +2247,19 @@ async def _automod_act(message: discord.Message, result: dict):
     if not live:
         title = f"[SHADOW] 🤖 Would {'remove' if verdict == 'remove' else 'flag for review'}"
         color = discord.Color.light_grey()
+    if edited_from is not None:
+        title += " (✏️ after an edit)"
 
     embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
     embed.add_field(name="Author", value=f"{message.author.mention} ({message.author})", inline=True)
     embed.add_field(name="Channel", value=f"{channel.mention} · [jump]({message.jump_url})", inline=True)
     embed.add_field(name="Category", value=_CATEGORY_LABELS.get(result.get("category"), result.get("category") or "—"), inline=True)
     embed.add_field(name="Why", value=(result.get("reason") or "—")[:1024], inline=False)
-    embed.add_field(name="Content", value=(message.content or "(no text)")[:1024], inline=False)
+    embed.add_field(name="Content" if edited_from is None else "Content (after edit)",
+                    value=(message.content or "(no text)")[:1024], inline=False)
+    if edited_from is not None:
+        embed.add_field(name="Before the edit",
+                        value=(edited_from or "(original text not in the bot's memory)")[:1024], inline=False)
     if attachments:
         embed.add_field(name="Attachments", value=attachments[:1024], inline=False)
 
@@ -2481,6 +2505,31 @@ async def on_message(message: discord.Message):
         # Background task: the classifier call must never delay command handling.
         asyncio.create_task(_automod_check(message))
     await bot.process_commands(message)
+
+
+@bot.event
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+    """Re-run AutoMod when a message's text changes in a watched channel."""
+    if not (automod.ENABLED and automod.CHECK_EDITS) or payload.guild_id != GUILD_ID:
+        return
+    data = payload.data
+    # Link unfurls also arrive as edits; a real text edit carries edited_timestamp.
+    if "content" not in data or not data.get("edited_timestamp"):
+        return
+    new_text = data["content"]
+    before = payload.cached_message.content if payload.cached_message else _automod_checked.get(payload.message_id)
+    if before is not None and before == new_text:
+        return
+    channel = bot.get_channel(payload.channel_id)
+    if channel is None or (channel.id not in automod.CHANNEL_IDS
+                           and getattr(channel, "parent_id", None) not in automod.CHANNEL_IDS):
+        return
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return
+    if _automod_applies(message):
+        asyncio.create_task(_automod_check(message, edited_from=before or ""))
 
 
 @bot.event
