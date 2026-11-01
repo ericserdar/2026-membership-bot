@@ -256,6 +256,9 @@ class CougConnectBot(commands.Bot):
         # Slash-commands only; when_mentioned avoids needing a command prefix
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self._web_runner: web.AppRunner | None = None
+        # Task Board watchdog state (consecutive failures / outage already announced)
+        self._taskboard_fails = 0
+        self._taskboard_alerted = False
 
     async def setup_hook(self):
         db.init_db()
@@ -283,6 +286,7 @@ class CougConnectBot(commands.Bot):
         self.onboarding_drip_task.start()
         self.sponsor_watch_task.start()
         self.mood_slowmode_restore_task.start()
+        self.taskboard_watchdog_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -345,6 +349,41 @@ class CougConnectBot(commands.Bot):
     @tasks.loop(hours=1)
     async def cleanup_tokens_task(self):
         db.cleanup_expired_tokens()
+
+    @tasks.loop(minutes=5)
+    async def taskboard_watchdog_task(self):
+        """Uptime watchdog for the Player Task Board (separate Railway service).
+        Alerts #admin-moderators after 3 straight failed checks (~15 min down)
+        and posts a recovery note — one alert per outage, no spam."""
+        url = os.getenv("TASKBOARD_HEALTH_URL", "https://api.cougconnect.com/healthz")
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+                async with session.get(url) as resp:
+                    ok = resp.status == 200
+        except Exception:
+            ok = False
+        if ok:
+            if self._taskboard_alerted:
+                ch = self.get_channel(MOD_LOG_CHANNEL_ID)
+                if ch:
+                    await ch.send("✅ **Task Board is back up** — api.cougconnect.com is answering again.")
+            self._taskboard_fails = 0
+            self._taskboard_alerted = False
+            return
+        self._taskboard_fails += 1
+        log.warning(f"Task Board health check failed ({self._taskboard_fails} in a row)")
+        if self._taskboard_fails >= 3 and not self._taskboard_alerted:
+            self._taskboard_alerted = True
+            ch = self.get_channel(MOD_LOG_CHANNEL_ID)
+            if ch:
+                await ch.send(
+                    "🚨 **Task Board is DOWN** — `api.cougconnect.com/healthz` has failed 3 checks in a row (~15 min). "
+                    "Athletes can't load gigs. Check the `cougconnect-task-board` service on Railway."
+                )
+
+    @taskboard_watchdog_task.before_loop
+    async def before_taskboard_watchdog(self):
+        await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=10, minute=0, tzinfo=datetime.timezone.utc))  # 3am MST (UTC-7)
     async def sync_all_members_task(self):
