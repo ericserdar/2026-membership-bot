@@ -41,6 +41,7 @@ import database as db
 import mailchimp
 import memberpress as mp
 import ses_mail
+import s3_backup
 import sponsor_watch
 import wp_link
 
@@ -485,9 +486,7 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=9, minute=0, tzinfo=datetime.timezone.utc))  # 2am MST (UTC-7)
     async def backup_db_task(self):
-        """Weekly (Sunday) SQLite backup emailed to the admin (not posted to Discord)."""
-        if dt.now(timezone.utc).weekday() != 6:  # loop fires daily; only Sunday sends
-            return
+        """Nightly SQLite snapshot to S3 (30-day retention); also emailed to the admin on Sundays."""
         backup_path = "/tmp/cougconnect-backup.db"
         try:
             src = sqlite3.connect(db.DB_PATH)
@@ -495,15 +494,28 @@ class CougConnectBot(commands.Bot):
             src.backup(dest)
             dest.close()
             src.close()
-            stamp = dt.now(timezone.utc).strftime("%Y-%m-%d")
-            sent = await send_report_email(
-                subject=f"CougConnect weekly database backup — {stamp}",
-                body_text=f"Attached is the weekly SQLite backup for {stamp}.",
-                attachment_path=backup_path,
-                attachment_name=f"cougconnect-{stamp}.db",
-            )
-            if not sent:
-                await post_admin_log("❌ **Nightly DB backup email failed to send** — check SES config/logs.")
+            now = dt.now(timezone.utc)
+            stamp = now.strftime("%Y-%m-%d")
+
+            if s3_backup.configured():
+                try:
+                    await s3_backup.upload(backup_path, f"membership/cougconnect-{stamp}.db")
+                except s3_backup.S3Error as e:
+                    log.error(f"DB backup S3 upload failed: {e}")
+                    await post_admin_log(f"❌ **Nightly DB backup upload to S3 failed:** `{e}`")
+            else:
+                log.warning("DB backup not uploaded — BACKUP_S3_BUCKET not set.")
+
+            if now.weekday() == 6:  # loop fires daily; the email goes out Sundays only
+                sent = await send_report_email(
+                    subject=f"CougConnect weekly database backup — {stamp}",
+                    body_text=f"Attached is the weekly SQLite backup for {stamp}. "
+                              "Daily copies for the last 30 days are in S3 (cougconnect-bot-backups/membership/).",
+                    attachment_path=backup_path,
+                    attachment_name=f"cougconnect-{stamp}.db",
+                )
+                if not sent:
+                    await post_admin_log("❌ **Weekly DB backup email failed to send** — check SES config/logs.")
         except Exception as e:
             log.error(f"DB backup failed: {e}")
             await post_admin_log(f"❌ **Nightly DB backup failed:** `{e}`")
