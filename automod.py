@@ -25,8 +25,11 @@ def _flag(name: str) -> bool:
 
 
 ENABLED = _flag("AUTOMOD_ENABLED")
-# "log" = shadow mode (report only, never delete/DM). "live" = act on verdicts.
+# "log"    = shadow: report only, cards marked [SHADOW], mods grade them.
+# "review" = real cards for every flag, but the bot NEVER deletes; a mod decides (Remove / Dismiss).
+# "live"   = like review, plus "remove" verdicts are deleted automatically (with a DM).
 MODE = os.getenv("AUTOMOD_MODE", "log").strip().lower()
+AUTO_REMOVE = MODE == "live"
 MODEL = os.getenv("AUTOMOD_MODEL", "claude-haiku-5-5").strip()
 CHANNEL_IDS = {
     int(x) for x in os.getenv("AUTOMOD_CHANNEL_IDS", "").replace(" ", "").split(",") if x.isdigit()
@@ -72,14 +75,20 @@ THE LINE: criticism is welcome; hostility is not.
 
 ALLOW (the vast majority of messages):
 - Criticism of play-calling, schemes, coaching decisions, roster/recruiting choices, effort, or results — even blunt, frustrated, or sarcastic. "That was the worst half I've seen in years" is allowed.
-- Venting about a loss, predicting a loss, disagreeing with other members, debating, jokes, trash talk aimed at rival teams/fans.
+- Venting about a loss, predicting a loss, disagreeing with other members, debating, jokes.
+- Trash talk about rival schools (Utah, etc.), their fans, alumni, students, or the school itself, even sweeping or harsh ("everyone who ever walked through those doors is terrible"). Rivalry banter is part of being a fan here; it is never an attack on a community member.
+- Sarcasm, irony and absurd hyperbole, especially "insults" aimed at people the community obviously loves (praising someone by pretending to trash them). If the joke reads as a joke, allow it.
+- Griping about fans or posters in general, or about people outside this Discord (X/Twitter accounts, media, other fan bases): "maybe sports isn't for you if you're this miserable", "I hope that guy on X sees this".
+- Scolding the channel's attitude as a whole without singling anyone out ("stop the defeatist garbage and get behind the team"), even if blunt or a little insulting.
 - Calling for a coach to be replaced, argued on performance ("Roderick has to go if the offense keeps stalling") — that is criticism.
 - Mild profanity used for emphasis, not aimed at a person.
 
 REVIEW (genuinely borderline — a human mod will look; the message stays up):
-- Heated messages that edge toward personal but aren't clearly an attack.
+- Heated messages aimed at a SPECIFIC member of this community (by @mention, name, or clear reply) that edge toward personal but aren't clearly an attack.
+- Questioning a specific member's loyalty or worth as a fan ("I have 0 faith you're a real BYU fan").
 - Sustained doom ("season's over, why do we even bother") that drags the channel down but targets no one.
-- Possible sarcasm or in-joke you cannot read confidently from context.
+- Rumors or speculation about a BYU player's or coach's personal life (relationships, money, legal trouble).
+Review is for messages a moderator would actually want to see. Our mods have marked rivalry trash talk, obvious sarcasm, and general griping about fans as false alarms; do not send those to review.
 
 REMOVE (clear violations):
 - Personal attacks or insults aimed at a specific player, coach, staff member, or community member ("[player] is trash, cut him", "you're an idiot", mocking someone's family, body, faith, or background).
@@ -98,6 +107,10 @@ EXAMPLES
 - "We're going to lose by 20 Saturday, calling it now." -> allow
 - "Kalani needs to be on the hot seat if we lose to Utah again." -> allow
 - "Utah fans are the worst lol" -> allow
+- "Literally everyone that has ever passed through those doors is terrible" (about Utah) -> allow (rivalry trash talk)
+- "You're right, Kalani, Weddle, Jay Hill and many others are the scourge of the earth" -> allow (obvious sarcasm)
+- "I don't get why people are fans if they act like this. Maybe sports isn't for you." -> allow (general griping, no one singled out)
+- "Stop it with your idiotic defeatist attitude and get behind the freaking team." -> allow (scolding the channel, no one named)
 - "[player] is trash, cut him and give the job to a walk-on." -> remove (attack on a player)
 - "Anyone who still defends this staff is a moron." -> remove (attack on members)
 - "This program is dead. Everyone should cancel their subs and stop wasting money." -> remove (doom-spiral urging others to leave)

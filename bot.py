@@ -289,6 +289,7 @@ class CougConnectBot(commands.Bot):
         self.sponsor_watch_task.start()
         self.mood_slowmode_restore_task.start()
         self.taskboard_watchdog_task.start()
+        self.automod_digest_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -1027,6 +1028,23 @@ class CougConnectBot(commands.Bot):
 
     @news_task.before_loop
     async def before_news(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc))  # 9am MST / 10am MDT
+    async def automod_digest_task(self):
+        """Monday AutoMod recap to #admin-moderators."""
+        if dt.now(timezone.utc).weekday() != 0 or not automod.ENABLED:
+            return
+        channel = self.get_channel(MOD_LOG_CHANNEL_ID)
+        if channel is None:
+            return
+        try:
+            await channel.send(embed=_automod_digest_embed(7), allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            log.error(f"automod: weekly digest failed: {e}")
+
+    @automod_digest_task.before_loop
+    async def before_automod_digest(self):
         await self.wait_until_ready()
 
 
@@ -2028,6 +2046,64 @@ async def _automod_ignore(interaction: discord.Interaction, status: str | None):
         pass
 
 
+async def _automod_timeout(interaction: discord.Interaction, minutes: int):
+    """Time out the card's author. The card stays open; the timeout is noted on it and in the audit log."""
+    perms = getattr(interaction.user, "guild_permissions", None)
+    if not (perms and perms.moderate_members):
+        await interaction.response.send_message("You need **Timeout Members** permission for this.", ephemeral=True)
+        return
+    flag_id = _automod_flag_id(interaction)
+    row = db.get_flag(flag_id) if flag_id else None
+    if not row:
+        await interaction.response.send_message("Couldn't find the record for this entry.", ephemeral=True)
+        return
+    label = f"{minutes} min" if minutes < 60 else f"{minutes // 60} hr"
+    guild = interaction.guild
+    member = guild.get_member(int(row["author_id"])) if guild else None
+    if member is None and guild:
+        try:
+            member = await guild.fetch_member(int(row["author_id"]))
+        except discord.NotFound:
+            member = None
+    if member is None:
+        await interaction.response.send_message("That member isn't in the server anymore.", ephemeral=True)
+        return
+    try:
+        await member.timeout(datetime.timedelta(minutes=minutes),
+                             reason=f"AutoMod #{flag_id}: {label} timeout by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "I couldn't time them out. The bot needs **Timeout Members**, and its role has to sit above theirs.",
+            ephemeral=True)
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Timeout failed: {e}", ephemeral=True)
+        return
+    _automod_audit(interaction, flag_id, "timeout", label)
+    embed = interaction.message.embeds[0]
+    note = f"⏱️ {label} by {interaction.user.mention} {discord.utils.format_dt(discord.utils.utcnow(), 'R')}"
+    idx = next((i for i, f in enumerate(embed.fields) if f.name == "Timeouts"), None)
+    if idx is None:
+        embed.add_field(name="Timeouts", value=note, inline=False)
+    else:
+        embed.set_field_at(idx, name="Timeouts", value=(embed.fields[idx].value + "\n" + note)[:1024], inline=False)
+    await interaction.response.edit_message(embed=embed)
+    await interaction.followup.send(f"{member.mention} timed out for {label}.", ephemeral=True,
+                                    allowed_mentions=discord.AllowedMentions.none())
+
+
+def _add_timeout_buttons(view: discord.ui.View, prefix: str):
+    """Second row of every AutoMod card: ⏱️ 10 min / ⏱️ 1 hr. custom_ids are per view so persistence works."""
+    for minutes, label in ((10, "10 min"), (60, "1 hr")):
+        btn = discord.ui.Button(label=f"Timeout {label}", emoji="⏱️", style=discord.ButtonStyle.secondary,
+                                custom_id=f"automod_{prefix}_to{minutes}", row=1)
+
+        async def cb(interaction: discord.Interaction, minutes=minutes):
+            await _automod_timeout(interaction, minutes)
+        btn.callback = cb
+        view.add_item(btn)
+
+
 async def _automod_delete(row: dict) -> str:
     """Delete the original message. Returns a short status for the log."""
     channel = bot.get_channel(int(row["channel_id"]))
@@ -2052,6 +2128,7 @@ class AutoModRemovedView(discord.ui.View):
     """On a live removal: let a mod undo it."""
     def __init__(self):
         super().__init__(timeout=None)
+        _add_timeout_buttons(self, "removed")
 
     @discord.ui.button(label="Restore", style=discord.ButtonStyle.secondary, emoji="↩️", custom_id="automod_restore")
     async def restore(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2086,6 +2163,7 @@ class AutoModReviewView(discord.ui.View):
     """Borderline (message still up): mod removes or dismisses."""
     def __init__(self):
         super().__init__(timeout=None)
+        _add_timeout_buttons(self, "review")
 
     @discord.ui.button(label="Remove", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="automod_review_remove")
     async def remove(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2126,6 +2204,7 @@ class AutoModShadowView(discord.ui.View):
     """Shadow mode: nothing happened; mods grade the call so we can tune it."""
     def __init__(self):
         super().__init__(timeout=None)
+        _add_timeout_buttons(self, "shadow")
 
     async def _grade(self, interaction: discord.Interaction, status: str, action: str, note: str):
         if not await _automod_mod_only(interaction):
@@ -2238,12 +2317,28 @@ async def _mood_act(channel: discord.TextChannel, hit: dict):
     log.info(f"mood: {'live' if live else 'shadow'} trigger in #{channel.name}: {stats}")
 
 
+def _history_line(h: dict) -> str:
+    if not (h["automod"] or h["manual"] or h["timeouts"]):
+        return "First flag. Nothing else in the last 30 days."
+    parts = [f"**{h['automod']}** earlier AutoMod flag{'s' if h['automod'] != 1 else ''}"]
+    if h["automod"]:
+        parts.append(f"{h['confirmed']} confirmed by mods · {h['false_alarms']} false alarm{'s' if h['false_alarms'] != 1 else ''}")
+    if h["manual"]:
+        parts.append(f"🚩 {h['manual']} member flag{'s' if h['manual'] != 1 else ''}")
+    if h["timeouts"]:
+        parts.append(f"⏱️ {h['timeouts']} timeout{'s' if h['timeouts'] != 1 else ''}")
+    return " · ".join(parts)
+
+
 async def _automod_act(message: discord.Message, result: dict, edited_from: str | None = None):
-    verdict, live = result["verdict"], automod.MODE == "live"
+    verdict = result["verdict"]
+    live = automod.MODE in ("live", "review")      # real cards (not [SHADOW])
+    auto_remove = live and automod.AUTO_REMOVE     # only "live" deletes on its own
+    history = db.get_author_flag_history(str(message.author.id), days=30)  # before this flag is logged
     channel = message.channel
     attachments = ", ".join(a.url for a in message.attachments)
     content = message.content + (f"\n[attachments: {attachments}]" if attachments else "")
-    status = ("removed" if verdict == "remove" else "open") if live else "shadow"
+    status = ("removed" if verdict == "remove" and auto_remove else "open") if live else "shadow"
     flag_id = db.log_flagged_message(
         str(message.id), str(channel.id), getattr(channel, "name", "?"),
         str(message.author.id), str(message.author), content,
@@ -2252,8 +2347,10 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
         reason=result.get("reason"), category=result.get("category"),
     )
 
-    if verdict == "remove":
+    if verdict == "remove" and auto_remove:
         title, color = "🤖 AutoMod Removed", discord.Color.red()
+    elif verdict == "remove":
+        title, color = "🤖 AutoMod: likely over the line, still up, needs a mod", discord.Color.red()
     else:
         title, color = "🤖 AutoMod Review: still up, needs a look", discord.Color.orange()
     if not live:
@@ -2274,9 +2371,10 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
                         value=(edited_from or "(original text not in the bot's memory)")[:1024], inline=False)
     if attachments:
         embed.add_field(name="Attachments", value=attachments[:1024], inline=False)
+    embed.add_field(name="Author history (30 days)", value=_history_line(history), inline=False)
 
     note = None
-    if live and verdict == "remove":
+    if auto_remove and verdict == "remove":
         try:
             await message.delete()
         except discord.Forbidden:
@@ -2303,7 +2401,7 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
 
     if not live:
         view = AutoModShadowView()
-    elif verdict == "remove" and not note:
+    elif auto_remove and verdict == "remove" and not note:
         view = AutoModRemovedView()
     else:
         view = AutoModReviewView()
@@ -3449,7 +3547,8 @@ async def automod_stats(interaction: discord.Interaction, days: int = 7):
     total = sum(n for _, _, n in rows)
     def n(verdict=None, status=None):
         return sum(c for v, s, c in rows if (verdict is None or v == verdict) and (status is None or s == status))
-    mode = "LIVE" if automod.MODE == "live" else "SHADOW (log only)"
+    mode = {"live": "LIVE (auto-removes)", "review": "REVIEW (mods decide, nothing auto-removed)"}.get(
+        automod.MODE, "SHADOW (log only)")
     embed = discord.Embed(
         title="🤖 AutoMod Stats",
         description=(f"Mode: **{mode}** · {'enabled' if automod.ENABLED else '**disabled**'} · `{automod.MODEL}`\n"
@@ -3488,9 +3587,80 @@ async def automod_stats(interaction: discord.Interaction, days: int = 7):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+def _automod_digest_embed(days: int = 7) -> discord.Embed:
+    stats = db.get_automod_stats(days=days)
+    rows = stats["by_verdict_status"]
+    def n(verdict=None, status=None):
+        return sum(c for v, s_, c in rows if (verdict is None or v == verdict) and (status is None or s_ == status))
+    total = n()
+    end = dt.now(timezone.utc)
+    start = end - datetime.timedelta(days=days)
+    mode = {"live": "LIVE (auto-removes)", "review": "REVIEW (mods decide)"}.get(automod.MODE, "SHADOW (log only)")
+    embed = discord.Embed(
+        title=f"🤖 AutoMod weekly recap: {start:%b %-d} to {end:%b %-d}",
+        description=f"Mode: **{mode}** · **{total}** message{'s' if total != 1 else ''} flagged",
+        color=discord.Color.blurple(),
+    )
+    good, wrong = n(status="shadow_ok") + n(status="removed"), n(status="shadow_wrong") + n(status="dismissed") + n(status="overturned")
+    graded = good + wrong
+    ignored = n(status="shadow_ignored") + n(status="ignored")
+    waiting = n(status="shadow") + n(status="open")
+    rate = f" → **{round(100 * good / graded)}%** good" if graded else ""
+    embed.add_field(name="How the flags held up", value=(
+        f"👍 {good} good · 👎 {wrong} false alarm{'s' if wrong != 1 else ''}{rate}\n"
+        f"🙈 {ignored} ignored · ⏳ {waiting} never handled"
+    ), inline=False)
+
+    by_mod: dict[str, dict] = {}
+    for actor_id, _name, action, count in db.get_automod_action_counts(days):
+        by_mod.setdefault(actor_id, {})[action] = count
+    if by_mod:
+        icons = {"good_flag": "👍", "false_alarm": "👎", "ignored": "🙈", "removed": "🗑️",
+                 "dismissed": "✅", "restored": "↩️", "timeout": "⏱️"}
+        lines = []
+        for actor_id, acts in sorted(by_mod.items(), key=lambda kv: -sum(kv[1].values()))[:10]:
+            lines.append(f"<@{actor_id}>: **{sum(acts.values())}** · " +
+                         " ".join(f"{icons.get(a, a)}{c}" for a, c in sorted(acts.items(), key=lambda kv: -kv[1])))
+        embed.add_field(name="Who handled cards", value="\n".join(lines)[:1024], inline=False)
+    else:
+        embed.add_field(name="Who handled cards", value="No one pressed an AutoMod button this week.", inline=False)
+
+    repeat = db.get_top_flagged_authors(days)
+    if repeat:
+        embed.add_field(name="Flagged more than once", value="\n".join(
+            f"<@{aid}> ({name}): {k} flags" for aid, name, k in repeat)[:1024], inline=False)
+    if stats["by_category"]:
+        embed.add_field(name="Categories", value=" · ".join(
+            f"{_CATEGORY_LABELS.get(c, c)} {k}" for c, k in stats["by_category"])[:1024], inline=False)
+    moods = db.count_mood_events(days=days)
+    spend = db.get_automod_spend()
+    embed.add_field(name="Mood monitor · API spend", value=(
+        f"Stepped in {moods.get('live', 0)}x live, {moods.get('shadow', 0)}x shadow · "
+        f"${spend['cost']:.2f} of ${automod.MONTHLY_BUDGET_USD:.0f} this month ({spend['calls']:,} checks)"
+    ), inline=False)
+    if automod.MODE == "log":
+        if graded < 15:
+            nxt = f"Keep grading: {graded} graded so far, about 15 gives a fair read."
+        elif good / graded >= 0.8:
+            nxt = "Most flags are holding up. Ready to talk about moving to **review** mode (real cards, nothing auto-removed)."
+        else:
+            nxt = "Too many false alarms to go live. Worth another rubric pass on the 👎 cards."
+        embed.add_field(name="Next step", value=nxt, inline=False)
+    embed.set_footer(text="Every button press: /automod-audit · Full numbers: /automod-stats")
+    return embed
+
+
+@bot.tree.command(name="automod-digest", description="Preview the weekly AutoMod recap (only you see it)")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(days="Look-back window in days (default 7)")
+async def automod_digest(interaction: discord.Interaction, days: int = 7):
+    await interaction.response.send_message(embed=_automod_digest_embed(max(1, min(days, 90))), ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+
 _AUDIT_LABELS = {
     "good_flag": "👍 Good flag", "false_alarm": "👎 False alarm", "ignored": "🙈 Ignored",
-    "removed": "🗑️ Removed", "dismissed": "✅ Dismissed", "restored": "↩️ Restored",
+    "removed": "🗑️ Removed", "dismissed": "✅ Dismissed", "restored": "↩️ Restored", "timeout": "⏱️ Timeout",
 }
 
 

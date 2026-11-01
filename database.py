@@ -725,6 +725,50 @@ def get_automod_actions(days: int = 7, actor_id: str | None = None, limit: int =
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
+def get_author_flag_history(author_id: str, days: int = 30) -> dict:
+    """What the mods have seen from this member lately, for context on a new AutoMod card."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_actions(conn)
+        rows = conn.execute(
+            "SELECT COALESCE(source, 'manual'), COALESCE(status, '') FROM flagged_messages "
+            "WHERE author_id = ? AND flagged_at >= ?", (author_id, since),
+        ).fetchall()
+        timeouts = conn.execute(
+            "SELECT COUNT(*) FROM automod_actions a JOIN flagged_messages f ON f.id = a.flag_id "
+            "WHERE f.author_id = ? AND a.action LIKE 'timeout%' AND a.acted_at >= ?", (author_id, since),
+        ).fetchone()[0]
+    auto = [st for src, st in rows if src == "automod"]
+    return {
+        "automod": len(auto),
+        "confirmed": sum(st in ("shadow_ok", "removed") for st in auto),
+        "false_alarms": sum(st in ("shadow_wrong", "dismissed", "overturned") for st in auto),
+        "manual": sum(src != "automod" for src, _ in rows),
+        "timeouts": timeouts,
+    }
+
+
+def get_automod_action_counts(days: int = 7) -> list[tuple[str, str, str, int]]:
+    """(actor_id, actor_name, action, count) for the weekly digest."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_actions(conn)
+        return conn.execute(
+            "SELECT actor_id, MAX(actor_name), action, COUNT(*) FROM automod_actions WHERE acted_at >= ? "
+            "GROUP BY actor_id, action ORDER BY 4 DESC", (since,),
+        ).fetchall()
+
+
+def get_top_flagged_authors(days: int = 7, min_flags: int = 2) -> list[tuple[str, str, int]]:
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(
+            "SELECT author_id, MAX(author_name), COUNT(*) FROM flagged_messages WHERE source = 'automod' "
+            "AND flagged_at >= ? GROUP BY author_id HAVING COUNT(*) >= ? ORDER BY 3 DESC LIMIT 5",
+            (since, min_flags),
+        ).fetchall()
+
+
 def count_recent_flags_for_author(author_id: str, days: int = 7) -> int:
     """Flags that actually counted against the author: manual 🚩 flags and confirmed AutoMod removals."""
     since = (datetime.utcnow() - timedelta(days=days)).isoformat(sep=" ")
