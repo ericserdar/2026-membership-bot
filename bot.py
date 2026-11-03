@@ -1338,6 +1338,8 @@ def _welcome_dm_parts(tier: str, apartment_slug: str | None = None) -> tuple[str
     start.set_footer(text="Questions? Open a ticket in #support-ticket or just reply here. Go Cougs! 🏈")
 
     view = discord.ui.View(timeout=None)
+    if ob_url("welcome_video"):
+        view.add_item(discord.ui.Button(label="Watch Jake's welcome (0:40)", url=ob_url("welcome_video"), style=discord.ButtonStyle.link, emoji="🎬"))
     view.add_item(discord.ui.Button(label="Open your channels", url=ob_channel_link("general"), style=discord.ButtonStyle.link, emoji="💬"))
     view.add_item(discord.ui.Button(label="Pick your pings", url=ping_roles_link(), style=discord.ButtonStyle.link, emoji="🔔"))
     view.add_item(discord.ui.Button(label="Subscribe on YouTube", url=ob_url("youtube"), style=discord.ButtonStyle.link, emoji="▶️"))
