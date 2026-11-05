@@ -1340,3 +1340,52 @@ def gameday_reset(event_id: str) -> bool:
             (event_id,))
         conn.commit()
         return cur.rowcount > 0
+
+
+# ── AutoMod strikes (game-day timeout ladder) ────────────────────────────────
+# One row per automatic timeout. A mod lifting it voids the strike, so a
+# wrong call doesn't push the member up the ladder.
+
+def _init_automod_strikes(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS automod_strikes (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id   TEXT,
+            flag_id   INTEGER,
+            minutes   INTEGER,
+            at        TEXT,      -- ISO UTC
+            voided_at TEXT
+        )
+    """)
+
+
+def count_strikes(user_id: str, days: float) -> int:
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_strikes(conn)
+        return conn.execute(
+            "SELECT COUNT(*) FROM automod_strikes WHERE user_id = ? AND at >= ? AND voided_at IS NULL",
+            (user_id, since)).fetchone()[0]
+
+
+def add_strike(user_id: str, flag_id: int, minutes: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_strikes(conn)
+        conn.execute("INSERT INTO automod_strikes (user_id, flag_id, minutes, at) VALUES (?, ?, ?, ?)",
+                     (user_id, flag_id, minutes, datetime.utcnow().isoformat()))
+        conn.commit()
+
+
+def void_strike(flag_id: int) -> dict | None:
+    """Void the strike tied to this flag. Returns it (user_id, minutes) or None."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_strikes(conn)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM automod_strikes WHERE flag_id = ? AND voided_at IS NULL",
+                           (flag_id,)).fetchone()
+        if not row:
+            return None
+        conn.execute("UPDATE automod_strikes SET voided_at = ? WHERE id = ?",
+                     (datetime.utcnow().isoformat(), row["id"]))
+        conn.commit()
+        return dict(row)

@@ -42,6 +42,8 @@ TIMEOUT_S = float(os.getenv("AUTOMOD_TIMEOUT_S", "10"))
 CHECK_EDITS = os.getenv("AUTOMOD_CHECK_EDITS", "1").strip().lower() in ("1", "true", "yes", "on")
 
 VERDICTS = ("allow", "review", "remove")
+# Game-day channels add "timeout": the message stays up, the author gets a short cooldown.
+GAMEDAY_VERDICTS = ("allow", "timeout", "review", "remove")
 
 # Spend alerting: bot.py posts to the admin log + emails once each month when
 # month-to-date AutoMod spend crosses WARN_PCT of the budget, and again at 100%.
@@ -128,6 +130,29 @@ Return JSON with:
 - tone: the overall mood of the message itself, separate from the verdict: "positive" (excited, hopeful, joking around, supportive), "neutral" (questions, facts, analysis, logistics), "frustrated" (venting, angry at the team/refs/coaches, giving up, "we look awful", "this is a joke"), or "hostile" (aimed at a person). Most allowed criticism is "frustrated"; that's fine, it's only used to notice when a whole channel is boiling over.
 - dm_text: for "remove" only, 1-2 calm, friendly sentences to the author explaining why the message came down, e.g. "Hey — we pulled your message in #channel because it went after a player personally. Criticism of the team is always welcome; attacks on people aren't." No lecturing, no threats, never mention AI or automation. Empty string for allow/review."""
 
+# Appended (as a second system block) for game-day channels only. Eric's call,
+# Nov 5 2026: mods are busy during games, so game-day chat runs stricter than the
+# main channels, and members were told the first few games will be aggressive.
+GAMEDAY_ADDENDUM = """GAME-DAY CHANNEL: STRICTER RULES. This message is in a live game-day chat. The rules below OVERRIDE anything above that conflicts with them. Game-day chat is for cheering and reacting to the game, and moderators are not watching, so you enforce these yourself.
+
+REMOVE also (in addition to every REMOVE rule above):
+- Calling for a coach, coordinator, player or staff member to be fired, benched, cut, replaced or "gone", in any wording ("fire the OC", "bench him", "Roderick has to go", "time for a new coach"). On game day this is removed even when it's argued on performance.
+
+TIMEOUT (new level, between allow and remove; the message STAYS UP and the author gets a short cooldown):
+- Shaming or demeaning the team, the program or its performance as a whole, without targeting a named person: "this is embarrassing", "pathetic", "what a disgrace", "we're a joke", "this team is soft", "absolute clown show".
+- NOT a timeout: predicting a loss ("we're going to lose by 30"), plain venting ("ugh", "I'm turning this off", "I can't watch"), criticizing a specific play, call or scheme ("that play call was terrible"), or complaining about the refs. Those stay ALLOW.
+
+EXAMPLES (game day)
+- "That play call on 3rd and 2 was absolutely brain dead, fire the OC" -> remove (calls for a firing)
+- "Our secondary is getting torched again, this is embarrassing" -> timeout (shames the team)
+- "Ugh we're going to lose by 30, I'm turning this off" -> allow
+- "Refs are blind tonight, that was clearly pass interference" -> allow
+- "Utah fans are the worst, enjoy your participation trophy" -> allow
+- "Bench the QB already" -> remove
+
+For "timeout", dm_text is 1-2 calm, friendly sentences telling the author they're on a short cooldown in game-day chat and why (keep the frustration about specific plays, not shaming the team). Same tone rules as removals: no lecturing, never mention AI or automation.
+verdict may be "allow", "timeout", "review" or "remove"."""
+
 OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -144,6 +169,10 @@ OUTPUT_SCHEMA = {
     "required": ["verdict", "category", "reason", "tone", "dm_text"],
     "additionalProperties": False,
 }
+
+GAMEDAY_OUTPUT_SCHEMA = json.loads(json.dumps(OUTPUT_SCHEMA))
+GAMEDAY_OUTPUT_SCHEMA["properties"]["verdict"]["enum"] = list(GAMEDAY_VERDICTS)
+GAMEDAY_OUTPUT_SCHEMA["properties"]["category"]["enum"] += ["personnel_call", "team_shaming"]
 
 # ── Channel mood monitor ──────────────────────────────────────────────────────
 # Per-message removal only catches attacks. Post-loss pile-ups are hundreds of
@@ -242,15 +271,20 @@ def build_user_content(message_text: str, author: str, channel: str, context: li
 
 async def classify(message_text: str, author: str, channel: str,
                    context: list[tuple[str, str]] | None = None,
-                   reply_to: tuple[str, str] | None = None) -> dict | None:
-    """Return {verdict, category, reason, dm_text} or None (fail open)."""
+                   reply_to: tuple[str, str] | None = None, gameday: bool = False) -> dict | None:
+    """Return {verdict, category, reason, dm_text} or None (fail open).
+    gameday=True applies the stricter game-day rules and allows the "timeout" verdict."""
+    system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+    if gameday:
+        system.append({"type": "text", "text": GAMEDAY_ADDENDUM, "cache_control": {"type": "ephemeral"}})
     try:
         resp = await _get_client().messages.create(
             model=MODEL,
             max_tokens=1024,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            system=system,
             messages=[{"role": "user", "content": build_user_content(message_text, author, channel, context or [], reply_to)}],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+            output_config={"effort": "low", "format": {"type": "json_schema",
+                                                       "schema": GAMEDAY_OUTPUT_SCHEMA if gameday else OUTPUT_SCHEMA}},
         )
     except anthropic.APIConnectionError as e:
         log.warning(f"automod: connection/timeout, allowing message: {e}")
@@ -285,7 +319,7 @@ async def classify(message_text: str, author: str, channel: str,
     except (json.JSONDecodeError, TypeError):
         log.warning(f"automod: unparseable output, allowing message: {text[:200]!r}")
         return None
-    if result.get("verdict") not in VERDICTS:
+    if result.get("verdict") not in (GAMEDAY_VERDICTS if gameday else VERDICTS):
         log.warning(f"automod: bad verdict {result.get('verdict')!r}, allowing message")
         return None
     u = resp.usage

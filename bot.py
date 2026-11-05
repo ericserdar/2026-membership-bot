@@ -272,6 +272,7 @@ class CougConnectBot(commands.Bot):
         self.add_view(AutoModRemovedView())
         self.add_view(AutoModReviewView())
         self.add_view(AutoModShadowView())
+        self.add_view(AutoModTimeoutView())
         self.add_view(JerseyFormView())
         await self.tree.sync()
         log.info("Slash commands synced.")
@@ -1143,6 +1144,12 @@ _gameday_alerted: dict[str, float] = {}
 # mods get a card with ↩️ Restore. Borderline ones stay up as review cards.
 GAMEDAY_AUTOMOD_MODE = os.getenv("GAMEDAY_AUTOMOD_MODE", "live").strip().lower()
 GAMEDAY_CHANNEL_IDS: set[int] = set()   # open game-day channels (kept with automod.CHANNEL_IDS)
+# Automatic timeouts in game-day channels climb this ladder (minutes), one step
+# per strike in the last GAMEDAY_STRIKE_WINDOW_DAYS; the last step repeats.
+GAMEDAY_TIMEOUT_LADDER = [int(x) for x in os.getenv("GAMEDAY_TIMEOUT_LADDER", "1,5,5,10,10,30,60").split(",") if x.strip().isdigit()] or [1]
+GAMEDAY_STRIKE_WINDOW_DAYS = float(os.getenv("GAMEDAY_STRIKE_WINDOW_DAYS", "30"))
+# A removed post is a strike too (delete + timeout). 0 = removals only delete.
+GAMEDAY_TIMEOUT_ON_REMOVE = os.getenv("GAMEDAY_TIMEOUT_ON_REMOVE", "1").strip().lower() in ("1", "true", "yes", "on")
 
 # ESPN event ids to open NOW, for real, even in dry run (manual test / early open).
 GAMEDAY_FORCE_OPEN = {x.strip() for x in os.getenv("GAMEDAY_FORCE_OPEN", "").split(",") if x.strip()}
@@ -2570,6 +2577,49 @@ async def _automod_dm(author_id: int, text: str, content: str):
     await _dm_member(author_id, f"{text}\n\nYour message:\n{quoted}", what="automod DM", ignore_dry_run=True)
 
 
+class AutoModTimeoutView(discord.ui.View):
+    """Game-day auto timeout (message still up): lift it, remove the post, or clear the card."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Lift timeout", style=discord.ButtonStyle.secondary, emoji="↩️", custom_id="automod_lift_timeout")
+    async def lift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _automod_mod_only(interaction):
+            return
+        flag_id = _automod_flag_id(interaction)
+        row = db.get_flag(flag_id) if flag_id else None
+        if not row:
+            await interaction.response.send_message("Couldn't find the record for this entry.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        result = await _automod_lift_strike(interaction, flag_id, row)
+        db.set_flag_status(flag_id, "overturned")
+        _automod_audit(interaction, flag_id, "timeout_lifted", result)
+        await _automod_close_log(interaction, f"↩️ {result}")
+        await interaction.followup.send(result.capitalize() + ".", ephemeral=True)
+
+    @discord.ui.button(label="Remove post", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="automod_timeout_remove")
+    async def remove(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _automod_mod_only(interaction):
+            return
+        flag_id = _automod_flag_id(interaction)
+        row = db.get_flag(flag_id) if flag_id else None
+        if not row:
+            await interaction.response.send_message("Couldn't find the record for this entry.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        result = await _automod_delete(row)
+        if result in ("deleted", "already gone"):
+            db.set_flag_status(flag_id, "removed")
+        _automod_audit(interaction, flag_id, "removed", result)
+        await _automod_close_log(interaction, f"🗑️ Removed ({result})")
+        await interaction.followup.send(f"Message {result}.", ephemeral=True)
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, emoji="🙈", custom_id="automod_timeout_ignore")
+    async def ignore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _automod_ignore(interaction, None)  # timeout stands; just clear the card
+
+
 class AutoModRemovedView(discord.ui.View):
     """On a live removal: let a mod undo it."""
     def __init__(self):
@@ -2596,8 +2646,10 @@ class AutoModRemovedView(discord.ui.View):
         embed.set_footer(text="This message was removed by mistake and has been restored.")
         await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         db.set_flag_status(flag_id, "overturned")
-        _automod_audit(interaction, flag_id, "restored")
-        await _automod_close_log(interaction, "↩️ Restored")
+        # A wrong removal shouldn't leave the member timed out or up a ladder step.
+        lifted = await _automod_lift_strike(interaction, flag_id, row)
+        _automod_audit(interaction, flag_id, "restored", lifted)
+        await _automod_close_log(interaction, "↩️ Restored" + ("" if lifted.startswith("no automatic") else f" ({lifted})"))
         await interaction.response.send_message("Restored.", ephemeral=True)
 
     @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, emoji="🙈", custom_id="automod_removed_ignore")
@@ -2718,6 +2770,7 @@ async def _automod_check(message: discord.Message, edited_from: str | None = Non
         reply_to = await _automod_reply_target(message)
         result = await automod.classify(
             message.content, message.author.display_name, getattr(message.channel, "name", "?"), context, reply_to,
+            gameday=_is_gameday_channel(message.channel),
         )
     # Edits don't feed the mood monitor: the message was already counted once.
     if result and automod.MOOD_ENABLED and edited_from is None:
@@ -2794,6 +2847,46 @@ def _history_line(h: dict) -> str:
     return " · ".join(parts)
 
 
+def _is_gameday_channel(channel) -> bool:
+    return getattr(channel, "id", None) in GAMEDAY_CHANNEL_IDS or getattr(channel, "parent_id", None) in GAMEDAY_CHANNEL_IDS
+
+
+def _mins_label(m: int) -> str:
+    return f"{m} min" if m < 60 else f"{m // 60} hr" if m % 60 == 0 else f"{m} min"
+
+
+async def _gameday_strike(member, flag_id: int, reason: str) -> tuple[int | None, int, str | None]:
+    """Next step on the timeout ladder. Returns (minutes or None if it failed, strike number, problem)."""
+    prior = db.count_strikes(str(member.id), GAMEDAY_STRIKE_WINDOW_DAYS)
+    minutes = GAMEDAY_TIMEOUT_LADDER[min(prior, len(GAMEDAY_TIMEOUT_LADDER) - 1)]
+    if not isinstance(member, discord.Member):
+        return None, prior + 1, "author isn't a server member anymore"
+    try:
+        await member.timeout(datetime.timedelta(minutes=minutes), reason=f"AutoMod #{flag_id} (game day, strike {prior + 1}): {reason}"[:500])
+    except discord.Forbidden:
+        return None, prior + 1, "couldn't time them out (their role is above the bot's, or Timeout Members is missing)"
+    except discord.HTTPException as e:
+        return None, prior + 1, f"timeout failed: {e}"
+    db.add_strike(str(member.id), flag_id, minutes)
+    db.log_automod_action(flag_id, "auto_timeout", str(bot.user.id), "AutoMod (game day)", f"{minutes} min, strike {prior + 1}")
+    return minutes, prior + 1, None
+
+
+async def _automod_lift_strike(interaction: discord.Interaction, flag_id: int, row: dict) -> str:
+    """Void the strike for this flag and end the member's timeout if it's still running."""
+    strike = db.void_strike(flag_id)
+    if not strike:
+        return "no automatic timeout on this one"
+    member = interaction.guild.get_member(int(row["author_id"])) if interaction.guild else None
+    if member and member.is_timed_out():
+        try:
+            await member.timeout(None, reason=f"AutoMod #{flag_id}: lifted by {interaction.user}")
+        except discord.HTTPException as e:
+            return f"strike voided, but lifting the timeout failed: {e}"
+        return "timeout lifted, strike voided"
+    return "strike voided (timeout had already ended)"
+
+
 def _automod_mode_for(channel) -> str:
     """Game-day channels run GAMEDAY_AUTOMOD_MODE; everything else runs AUTOMOD_MODE."""
     cid = getattr(channel, "id", None)
@@ -2812,7 +2905,11 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     channel = message.channel
     attachments = ", ".join(a.url for a in message.attachments)
     content = message.content + (f"\n[attachments: {attachments}]" if attachments else "")
-    status = ("removed" if verdict == "remove" and auto_remove else "open") if live else "shadow"
+    gameday_live = auto_remove and _is_gameday_channel(channel)
+    if verdict == "timeout" and not gameday_live:
+        verdict = "review"   # timeouts are only automatic in live game-day chat
+    status = ("removed" if verdict == "remove" and auto_remove else
+              "timeout" if verdict == "timeout" else "open") if live else "shadow"
     flag_id = db.log_flagged_message(
         str(message.id), str(channel.id), getattr(channel, "name", "?"),
         str(message.author.id), str(message.author), content,
@@ -2821,7 +2918,9 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
         reason=result.get("reason"), category=result.get("category"),
     )
 
-    if verdict == "remove" and auto_remove:
+    if verdict == "timeout":
+        title, color = "🤖 AutoMod Timeout: message still up, author on cooldown", discord.Color.gold()
+    elif verdict == "remove" and auto_remove:
         title, color = "🤖 AutoMod Removed", discord.Color.red()
     elif verdict == "remove":
         title, color = "🤖 AutoMod: likely over the line, still up, needs a mod", discord.Color.red()
@@ -2848,6 +2947,24 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     embed.add_field(name="Author history (30 days)", value=_history_line(history), inline=False)
 
     note = None
+    # Game-day strike: timeouts always, removals too unless GAMEDAY_TIMEOUT_ON_REMOVE=0.
+    # An edit never adds a second strike for the same message.
+    timeout_line = ""
+    if gameday_live and edited_from is None and (verdict == "timeout" or (verdict == "remove" and GAMEDAY_TIMEOUT_ON_REMOVE)):
+        minutes, strike_no, problem = await _gameday_strike(message.author, flag_id, result.get("reason") or verdict)
+        if minutes:
+            embed.add_field(name="⏱️ Auto timeout", value=f"**{_mins_label(minutes)}** (strike {strike_no} in "
+                            f"{GAMEDAY_STRIKE_WINDOW_DAYS:g} days). **Lift timeout** voids the strike.", inline=False)
+            timeout_line = (f"\n\n⏱️ You're on a **{_mins_label(minutes)} timeout** in the server. "
+                            "Timeouts get longer each time it happens.")
+        else:
+            note = f"⚠️ Auto timeout not applied: {problem}."
+    if verdict == "timeout":
+        dm_text = (result.get("dm_text") or "").strip() or (
+            f"Hey, quick cooldown in **#{getattr(channel, 'name', '?')}**. Game-day chat is for reacting to the game; "
+            "keep the frustration on specific plays instead of shaming the team.")
+        if timeout_line:
+            await _automod_dm(message.author.id, dm_text + timeout_line, message.content)
     if auto_remove and verdict == "remove":
         try:
             await message.delete()
@@ -2858,7 +2975,7 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
             pass
         else:
             dm_text = (result.get("dm_text") or "").strip() or AUTOMOD_MOD_REMOVED_DM.format(channel=getattr(channel, "name", "?"))
-            await _automod_dm(message.author.id, dm_text, message.content)
+            await _automod_dm(message.author.id, dm_text + timeout_line, message.content)
         recent = db.count_recent_flags_for_author(str(message.author.id), days=7)
         if recent >= 3:
             embed.add_field(name="⚠️ Repeat", value=f"{recent} removals in the last 7 days. Mods may want a timeout.", inline=False)
@@ -2875,6 +2992,8 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
 
     if not live:
         view = AutoModShadowView()
+    elif verdict == "timeout":
+        view = AutoModTimeoutView()
     elif auto_remove and verdict == "remove" and not note:
         view = AutoModRemovedView()
     else:
