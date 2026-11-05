@@ -1329,3 +1329,14 @@ def gameday_row_by_channel(channel_id: str) -> dict | None:
             "SELECT * FROM gameday_games WHERE channel_id = ? AND closed_at IS NULL", (str(channel_id),)
         ).fetchone()
     return dict(row) if row else None
+
+
+def gameday_reset(event_id: str) -> bool:
+    """Forget a game so the scheduler opens it again. Refuses while its channel is open."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_gameday_games(conn)
+        cur = conn.execute(
+            "DELETE FROM gameday_games WHERE event_id = ? AND (channel_id IS NULL OR closed_at IS NOT NULL)",
+            (event_id,))
+        conn.commit()
+        return cur.rowcount > 0

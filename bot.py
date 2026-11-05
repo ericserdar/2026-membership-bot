@@ -294,6 +294,10 @@ class CougConnectBot(commands.Bot):
         self.automod_expire_task.start()
         # Game-day channels opened before a restart are still open: put them
         # back on AutoMod's watch list, then resume the schedule loop.
+        # GAMEDAY_RESET_EVENTS: ESPN event ids to forget (e.g. a channel closed by
+        # hand before the game) so they open again on schedule. Never touches an open channel.
+        for eid in filter(None, (x.strip() for x in os.getenv("GAMEDAY_RESET_EVENTS", "").split(","))):
+            log.info(f"gameday: reset event {eid}: {'done' if db.gameday_reset(eid) else 'nothing to reset'}")
         for row in db.gameday_open_rows():
             automod.CHANNEL_IDS.add(int(row["channel_id"]))
         self.gameday_task.start()
