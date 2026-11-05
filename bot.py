@@ -1334,7 +1334,7 @@ async def _gameday_transcript(channel: discord.TextChannel) -> tuple[str, int]:
     return "\n".join(lines), count
 
 
-async def close_gameday_channel(row: dict) -> bool:
+async def close_gameday_channel(row: dict, force: bool = False) -> bool:
     """Archive the transcript to the admin log, then delete the channel.
     Only ever runs on a channel recorded in gameday_games; no transcript, no delete."""
     guild = get_guild()
@@ -1351,7 +1351,7 @@ async def close_gameday_channel(row: dict) -> bool:
         log.info(f"gameday: channel {row['channel_id']} ({label}) already gone; marked closed")
         return True
 
-    if gameday.DRY_RUN:
+    if gameday.DRY_RUN and not force:
         if row.get("dry_run_note") != "close":
             _, count = await _gameday_transcript(channel)
             await post_admin_log(f"🧪 **Game-day DRY RUN, would archive and delete** {channel.mention} "
@@ -4213,7 +4213,8 @@ async def gameday_close(interaction: discord.Interaction, channel: discord.TextC
         await interaction.followup.send(f"{channel.mention} isn't a game-day channel this bot opened, so it "
                                         "won't be touched.", ephemeral=True)
         return
-    ok = await close_gameday_channel(row)
+    # An admin asking explicitly closes it for real, even in dry run.
+    ok = await close_gameday_channel(row, force=True)
     await interaction.followup.send("Archived and deleted; transcript is in the admin log." if ok
                                     else "Not deleted. The admin log says why.", ephemeral=True)
 
