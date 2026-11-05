@@ -300,6 +300,7 @@ class CougConnectBot(commands.Bot):
             log.info(f"gameday: reset event {eid}: {'done' if db.gameday_reset(eid) else 'nothing to reset'}")
         for row in db.gameday_open_rows():
             automod.CHANNEL_IDS.add(int(row["channel_id"]))
+            GAMEDAY_CHANNEL_IDS.add(int(row["channel_id"]))
         self.gameday_task.start()
 
     async def on_ready(self):
@@ -1137,6 +1138,12 @@ GAMEDAY_ALERT_CHANNEL_ID = int(os.getenv("GAMEDAY_ALERT_CHANNEL_ID", "1493610618
 GAMEDAY_ALERT_REPEAT_S = 3600
 _gameday_alerted: dict[str, float] = {}
 
+# AutoMod mode inside game-day channels, independent of AUTOMOD_MODE elsewhere.
+# "live" (default) = over-the-line posts are deleted on the spot, member gets a DM,
+# mods get a card with ↩️ Restore. Borderline ones stay up as review cards.
+GAMEDAY_AUTOMOD_MODE = os.getenv("GAMEDAY_AUTOMOD_MODE", "live").strip().lower()
+GAMEDAY_CHANNEL_IDS: set[int] = set()   # open game-day channels (kept with automod.CHANNEL_IDS)
+
 # ESPN event ids to open NOW, for real, even in dry run (manual test / early open).
 GAMEDAY_FORCE_OPEN = {x.strip() for x in os.getenv("GAMEDAY_FORCE_OPEN", "").split(",") if x.strip()}
 
@@ -1281,6 +1288,7 @@ async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextC
                       kickoff=_iso(game["kickoff"]), channel_id=str(channel.id),
                       opened_at=_iso(dt.now(timezone.utc)))
     automod.CHANNEL_IDS.add(channel.id)
+    GAMEDAY_CHANNEL_IDS.add(channel.id)
 
     # discord.py 2.3 drops permission bits it doesn't know (Pin Messages, Bypass
     # Slowmode, Send Polls), so re-apply the reference channel's role overwrites
@@ -1315,7 +1323,8 @@ async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextC
 
     log.info(f"gameday: opened #{name} ({channel.id})")
     await post_admin_log(f"{gameday.EMOJI.get(game['sport'], '')} **Game-day channel opened**: {channel.mention} "
-                         f"({gameday.matchup(game)}). AutoMod is watching it.")
+                         f"({gameday.matchup(game)}). AutoMod: **{GAMEDAY_AUTOMOD_MODE}**"
+                         + (" (over-the-line posts are deleted automatically)." if GAMEDAY_AUTOMOD_MODE == "live" else "."))
     return channel
 
 
@@ -1351,6 +1360,7 @@ async def close_gameday_channel(row: dict, force: bool = False) -> bool:
 
     if not channel:
         automod.CHANNEL_IDS.discard(int(row["channel_id"]))
+        GAMEDAY_CHANNEL_IDS.discard(int(row["channel_id"]))
         db.gameday_upsert(row["event_id"], closed_at=_iso(dt.now(timezone.utc)))
         log.info(f"gameday: channel {row['channel_id']} ({label}) already gone; marked closed")
         return True
@@ -1391,6 +1401,7 @@ async def close_gameday_channel(row: dict, force: bool = False) -> bool:
     gameday_alert_clear(akey)
 
     automod.CHANNEL_IDS.discard(channel.id)
+    GAMEDAY_CHANNEL_IDS.discard(channel.id)
     db.gameday_upsert(row["event_id"], closed_at=_iso(dt.now(timezone.utc)))
     log.info(f"gameday: deleted #{channel.name} ({count} messages archived)")
     await post_admin_log(f"✅ **Game day closed**: `#{channel.name}` deleted, {count} message(s) archived above.")
@@ -2783,10 +2794,20 @@ def _history_line(h: dict) -> str:
     return " · ".join(parts)
 
 
+def _automod_mode_for(channel) -> str:
+    """Game-day channels run GAMEDAY_AUTOMOD_MODE; everything else runs AUTOMOD_MODE."""
+    cid = getattr(channel, "id", None)
+    pid = getattr(channel, "parent_id", None)
+    if cid in GAMEDAY_CHANNEL_IDS or pid in GAMEDAY_CHANNEL_IDS:
+        return GAMEDAY_AUTOMOD_MODE
+    return automod.MODE
+
+
 async def _automod_act(message: discord.Message, result: dict, edited_from: str | None = None):
     verdict = result["verdict"]
-    live = automod.MODE in ("live", "review")      # real cards (not [SHADOW])
-    auto_remove = live and automod.AUTO_REMOVE     # only "live" deletes on its own
+    mode = _automod_mode_for(message.channel)
+    live = mode in ("live", "review")              # real cards (not [SHADOW])
+    auto_remove = mode == "live"                   # only "live" deletes on its own
     history = db.get_author_flag_history(str(message.author.id), days=30)  # before this flag is logged
     channel = message.channel
     attachments = ", ".join(a.url for a in message.attachments)
