@@ -38,6 +38,7 @@ from dotenv import load_dotenv
 import aggregator
 import automod
 import database as db
+import gameday
 import mailchimp
 import memberpress as mp
 import ses_mail
@@ -291,6 +292,11 @@ class CougConnectBot(commands.Bot):
         self.taskboard_watchdog_task.start()
         self.automod_digest_task.start()
         self.automod_expire_task.start()
+        # Game-day channels opened before a restart are still open: put them
+        # back on AutoMod's watch list, then resume the schedule loop.
+        for row in db.gameday_open_rows():
+            automod.CHANNEL_IDS.add(int(row["channel_id"]))
+        self.gameday_task.start()
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -1073,6 +1079,20 @@ class CougConnectBot(commands.Bot):
     async def before_automod_digest(self):
         await self.wait_until_ready()
 
+    @tasks.loop(minutes=5)
+    async def gameday_task(self):
+        """Open game-day channels before kickoff; close them a day after the final."""
+        if not gameday.ENABLED:
+            return
+        try:
+            await run_gameday_cycle()
+        except Exception as e:
+            log.exception(f"gameday: cycle failed: {e}")
+
+    @gameday_task.before_loop
+    async def before_gameday(self):
+        await self.wait_until_ready()
+
 
 bot = CougConnectBot()
 
@@ -1091,6 +1111,261 @@ async def post_admin_log(message: str):
             await channel.send(message)
         except Exception as e:
             log.error(f"Failed to post admin log: {e}")
+
+
+# ── Game-day channels ─────────────────────────────────────────────────────────
+# gameday.py knows the schedule and the clock; this section does the Discord
+# side. A channel copies its access rules from the sport's main channel, so it
+# is visible to exactly the people who can see #🏈-byufootball / #🏀-byubasketball,
+# and it's added to AutoMod's watch list for as long as it exists.
+
+GAMEDAY_REF_CHANNEL_IDS = {
+    "football": int(os.getenv("GAMEDAY_REF_FOOTBALL_ID", "1050091238730236055")),      # #🏈-byufootball
+    "basketball": int(os.getenv("GAMEDAY_REF_BASKETBALL_ID", "1050104741692178432")),  # #🏀-byubasketball
+}
+
+
+def _iso(t: datetime.datetime) -> str:
+    return t.astimezone(timezone.utc).isoformat()
+
+
+def _from_iso(s: str | None) -> datetime.datetime | None:
+    return dt.fromisoformat(s) if s else None
+
+
+def _mt(t: datetime.datetime) -> str:
+    return t.astimezone(gameday.MOUNTAIN).strftime("%a %b %-d, %-I:%M %p MT")
+
+
+def _gameday_overwrites(guild: discord.Guild, ref: discord.TextChannel | None) -> dict:
+    """The reference channel's ROLE overwrites (not one-off member overrides),
+    plus the bot itself so it can always post, pin and delete."""
+    overwrites = {}
+    if ref:
+        for target, ow in ref.overwrites.items():
+            if isinstance(target, discord.Role):
+                overwrites[target] = ow
+    if not overwrites:
+        # Never open a channel visible to everyone (Discord is paid-only).
+        overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+    overwrites[guild.me] = discord.PermissionOverwrite(
+        view_channel=True, send_messages=True, manage_channels=True,
+        manage_messages=True, read_message_history=True, attach_files=True,
+    )
+    return overwrites
+
+
+def _gameday_opener(game: dict) -> str:
+    tv = f"\n📺 **{game['tv']}**" if game.get("tv") else ""
+    return (
+        f"{gameday.EMOJI.get(game['sport'], '')} **Game day: {gameday.matchup(game)}**\n"
+        f"🕐 {gameday.kickoff_text(game)}{tv}\n\n"
+        f"Live reactions, takes and celebrating all go here. This channel closes "
+        f"{gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after the final whistle.\n\n"
+        f"**Games get heated. The rules don't change.** Players and their families read this "
+        f"server, so no shots at them or at each other. Criticize the play-calling all you "
+        f"want, but keep it about the game. The full list is in {ob_channel('rules')}.\n\n"
+        f"Go Cougs!"
+    )
+
+
+async def open_gameday_channel(game: dict) -> discord.TextChannel | None:
+    """Create this game's channel. Safe to call twice: the DB row short-circuits."""
+    guild = get_guild()
+    if not guild:
+        log.error("gameday: open skipped, guild not in cache")
+        return None
+    row = db.gameday_get(game["event_id"]) or {}
+    if row.get("channel_id"):
+        return guild.get_channel(int(row["channel_id"]))
+
+    name = gameday.channel_name(game)
+    ref = guild.get_channel(GAMEDAY_REF_CHANNEL_IDS.get(game["sport"], 0))
+    category = ref.category if ref else None
+
+    if gameday.DRY_RUN:
+        if row.get("dry_run_note") != "open":
+            await post_admin_log(
+                f"🧪 **Game-day DRY RUN, would open** `#{name}` ({gameday.matchup(game)}, {gameday.kickoff_text(game)})\n"
+                f"• Category: **{category.name if category else '⚠️ none'}**, access copied from "
+                f"{ref.mention if ref else '⚠️ missing reference channel'}\n"
+                f"• AutoMod would watch it; it would close {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after the final.\n"
+                f"• Nothing was created."
+            )
+            db.gameday_upsert(game["event_id"], sport=game["sport"], opponent=game["opponent_full"],
+                              kickoff=_iso(game["kickoff"]), dry_run_note="open")
+        return None
+
+    try:
+        extra = {"position": ref.position + 1} if ref else {}
+        channel = await guild.create_text_channel(
+            name=name,
+            category=category,
+            overwrites=_gameday_overwrites(guild, ref),
+            **extra,
+            topic=f"{gameday.matchup(game)} · {gameday.kickoff_text(game)}. "
+                  f"Closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after the game ends.",
+            reason="CougConnect game-day channel",
+        )
+    except Exception as e:
+        log.error(f"gameday: create failed for {name}: {e}")
+        await post_admin_log(f"❌ Game-day channel `#{name}` failed to open: `{e}`")
+        return None
+
+    db.gameday_upsert(game["event_id"], sport=game["sport"], opponent=game["opponent_full"],
+                      kickoff=_iso(game["kickoff"]), channel_id=str(channel.id),
+                      opened_at=_iso(dt.now(timezone.utc)))
+    automod.CHANNEL_IDS.add(channel.id)
+
+    try:
+        msg = await channel.send(_gameday_opener(game), silent=True,
+                                 allowed_mentions=discord.AllowedMentions.none())
+        await msg.pin(reason="Game-day opener")
+    except Exception as e:
+        log.error(f"gameday: opener failed in {name}: {e}")
+
+    # Point the sport's main channel at it, silently: no push to anyone.
+    if ref:
+        try:
+            await ref.send(
+                f"{gameday.EMOJI.get(game['sport'], '')} Game-day chat for **{gameday.matchup(game)}** "
+                f"is open: {channel.mention}",
+                silent=True, allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as e:
+            log.error(f"gameday: pointer post failed in #{ref.name}: {e}")
+
+    log.info(f"gameday: opened #{name} ({channel.id})")
+    await post_admin_log(f"{gameday.EMOJI.get(game['sport'], '')} **Game-day channel opened**: {channel.mention} "
+                         f"({gameday.matchup(game)}). AutoMod is watching it.")
+    return channel
+
+
+async def _gameday_transcript(channel: discord.TextChannel) -> tuple[str, int]:
+    """Whole history, oldest first, as plain text. Deletion is permanent, so this
+    runs first and any failure aborts the delete."""
+    lines = [f"# {channel.name}", f"# {channel.topic or ''}",
+             f"# archived {dt.now(gameday.MOUNTAIN).strftime('%Y-%m-%d %H:%M %Z')}", ""]
+    count = 0
+    async for m in channel.history(limit=None, oldest_first=True):
+        stamp = m.created_at.astimezone(gameday.MOUNTAIN).strftime("%m/%d %H:%M")
+        body = m.clean_content or ""
+        for a in m.attachments:
+            body += f"\n    [attachment] {a.filename}: {a.url}"
+        for e in m.embeds:
+            if e.title or e.description:
+                body += f"\n    [embed] {e.title or ''} {(e.description or '')[:200]}"
+        lines.append(f"[{stamp}] {m.author.display_name}: {body}".rstrip())
+        count += 1
+    return "\n".join(lines), count
+
+
+async def close_gameday_channel(row: dict) -> bool:
+    """Archive the transcript to the admin log, then delete the channel.
+    Only ever runs on a channel recorded in gameday_games; no transcript, no delete."""
+    guild = get_guild()
+    channel = guild.get_channel(int(row["channel_id"])) if guild else None
+    label = f"BYU / {row['opponent']}"
+
+    if not channel:
+        automod.CHANNEL_IDS.discard(int(row["channel_id"]))
+        db.gameday_upsert(row["event_id"], closed_at=_iso(dt.now(timezone.utc)))
+        log.info(f"gameday: channel {row['channel_id']} ({label}) already gone; marked closed")
+        return True
+
+    if gameday.DRY_RUN:
+        if row.get("dry_run_note") != "close":
+            _, count = await _gameday_transcript(channel)
+            await post_admin_log(f"🧪 **Game-day DRY RUN, would archive and delete** {channel.mention} "
+                                 f"({label}, {count} message(s)). Nothing was deleted.")
+            db.gameday_upsert(row["event_id"], dry_run_note="close")
+        return False
+
+    try:
+        transcript, count = await _gameday_transcript(channel)
+    except Exception as e:
+        await post_admin_log(f"⚠️ **{channel.mention} NOT deleted**: couldn't read its history (`{e}`). Retrying.")
+        return False
+
+    admin = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if not admin:
+        log.error("gameday: admin log unavailable; channel not deleted")
+        return False
+    try:
+        await admin.send(
+            f"🗄️ **Game-day archive: {label}** (`#{channel.name}`, {count} message(s)). Deleting the channel now.",
+            file=discord.File(io.BytesIO(transcript.encode("utf-8")),
+                              filename=f"{(row.get('kickoff') or '')[:10]}-{channel.name}.txt"),
+        )
+    except Exception as e:
+        await post_admin_log(f"⚠️ **{channel.mention} NOT deleted**: archive upload failed (`{e}`). Retrying.")
+        return False
+
+    try:
+        await channel.delete(reason="CougConnect game day over, transcript archived")
+    except Exception as e:
+        await post_admin_log(f"❌ {channel.mention} archived but delete failed: `{e}`")
+        return False
+
+    automod.CHANNEL_IDS.discard(channel.id)
+    db.gameday_upsert(row["event_id"], closed_at=_iso(dt.now(timezone.utc)))
+    log.info(f"gameday: deleted #{channel.name} ({count} messages archived)")
+    await post_admin_log(f"✅ **Game day closed**: `#{channel.name}` deleted, {count} message(s) archived above.")
+    return True
+
+
+_gameday_fetch_failed = False
+
+
+async def run_gameday_cycle():
+    """One pass: refresh the schedule, open what's due, mark finals, close what's due."""
+    global _gameday_fetch_failed
+    now = dt.now(timezone.utc)
+    games: dict[str, dict] = {}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            games = {g["event_id"]: g for g in await gameday.fetch_schedule(session)}
+        if _gameday_fetch_failed:
+            _gameday_fetch_failed = False
+            await post_admin_log("✅ Game-day schedule: ESPN is answering again.")
+    except Exception as e:
+        log.error(f"gameday: schedule fetch failed: {e}")
+        if not _gameday_fetch_failed:
+            _gameday_fetch_failed = True
+            await post_admin_log(f"⚠️ Game-day schedule fetch from ESPN failed (`{e}`). Open channels will "
+                                 "still close on the fallback clock; new ones wait until ESPN answers.")
+
+    # 1. Open. Only games kicking off in the next OPEN_HOURS_BEFORE; never one already final.
+    for g in games.values():
+        if gameday.should_open(g, now):
+            row = db.gameday_get(g["event_id"]) or {}
+            if not row.get("closed_at"):
+                await open_gameday_channel(g)
+
+    # 2. Work out when each open channel closes.
+    for row in db.gameday_open_rows():
+        if row.get("close_at"):
+            continue
+        g = games.get(row["event_id"])
+        kickoff = _from_iso(row["kickoff"])
+        if g and (g["state"] == "post" or gameday.is_called_off(g)):
+            close_at = gameday.close_at_from_end(now)
+            db.gameday_upsert(row["event_id"], ended_at=_iso(now), close_at=_iso(close_at))
+            why = "is final" if g["state"] == "post" else f"was called off ({g['status_name']})"
+            await post_admin_log(f"🏁 {row['opponent']} game {why}; <#{row['channel_id']}> closes **{_mt(close_at)}**.")
+        elif kickoff and now > gameday.fallback_end(row["sport"], kickoff) + datetime.timedelta(hours=8):
+            # ESPN never said final (outage / bot asleep): fall back to an assumed game length.
+            end = gameday.fallback_end(row["sport"], kickoff)
+            close_at = gameday.close_at_from_end(end)
+            db.gameday_upsert(row["event_id"], ended_at=_iso(end), close_at=_iso(close_at))
+            await post_admin_log(f"⚠️ ESPN never reported the {row['opponent']} game final; "
+                                 f"<#{row['channel_id']}> closes on the fallback clock, **{_mt(close_at)}**.")
+
+    # 3. Close.
+    for row in db.gameday_open_rows():
+        close_at = _from_iso(row.get("close_at"))
+        if close_at and close_at <= now:
+            await close_gameday_channel(row)
 
 
 async def send_report_email(subject: str, body_text: str, attachment_path: str | None = None, attachment_name: str | None = None) -> bool:
@@ -1325,8 +1600,9 @@ def _welcome_dm_parts(tier: str, apartment_slug: str | None = None) -> tuple[str
     )
     start.add_field(
         name="🏈 Game days & Pick'em",
-        value=f"Live game chat runs on [a fan-run server]({ob_url('gameday_chat')}) — it isn't affiliated "
-              f"with CougConnect and we don't moderate it · Pick'em stays here in {ob_chan_md('pickem')}.",
+        value=f"A **BYU vs [opponent]** channel opens {gameday.hours_text(gameday.OPEN_HOURS_BEFORE)} before every "
+              f"football and basketball game and closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after it ends · "
+              f"Pick'em runs in {ob_chan_md('pickem')}.",
         inline=False,
     )
     start.add_field(
@@ -1355,8 +1631,8 @@ def _checkin_dm_text(days: int, tier: str) -> str:
         return (
             "👋 **One week in — here's how to get the most out of CougConnect:**\n"
             f"🔔 Pick your pings in [Channels & Roles]({ping_roles_link()}) — VC & AMA · Pick'em.\n"
-            f"🏈 Live game chat runs on a fan-run server — not ours, not moderated by us: "
-            f"<{ob_url('gameday_chat')}> — Pick'em is here in {ob_chan_md('pickem')}.\n"
+            f"🏈 Game days: a **BYU vs [opponent]** channel opens before every football and basketball game "
+            f"and closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after it ends. Pick'em is in {ob_chan_md('pickem')}.\n"
             f"📰 {ob_chan_md('news')} pulls every BYU story into one feed; voice-chat recaps land on the site.\n"
             f"▶️ The daily podcast is on YouTube — [subscribe]({ob_url('youtube')}) so episodes hit your feed.\n"
             f"🛍️ Gear: player tees (Kyler Kasper, Royal Nights, more) in [the shop]({ob_url('shop')})."
@@ -3787,6 +4063,72 @@ async def automod_audit(interaction: discord.Interaction, days: int = 7, mod: di
     embed.description = desc
     embed.set_footer(text=f"Newest {len(rows)} in the last {days} day{'s' if days != 1 else ''} · up to 25 shown")
     await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="gameday-status", description="Show open game-day channels and the next games")
+@app_commands.default_permissions(administrator=True)
+async def gameday_status(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    state = "🟢 on" if gameday.ENABLED else "🔴 off (GAMEDAY_CHANNELS)"
+    if gameday.ENABLED and gameday.DRY_RUN:
+        state += " · 🧪 dry run"
+    embed = discord.Embed(title="🏟️ Game-day channels", color=discord.Color.blue())
+    embed.add_field(name="Status", value=f"{state}\nOpens {gameday.hours_text(gameday.OPEN_HOURS_BEFORE)} before, "
+                    f"closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after the final.", inline=False)
+    rows = db.gameday_open_rows()
+    embed.add_field(name="Open now", value="\n".join(
+        f"<#{r['channel_id']}> · " + (f"closes **{_mt(_from_iso(r['close_at']))}**" if r.get("close_at") else "game not final yet")
+        for r in rows) or "None.", inline=False)
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            games = await gameday.fetch_schedule(session)
+        now = dt.now(timezone.utc)
+        nxt = [g for g in games if g["state"] == "pre" and g["kickoff"] > now][:6]
+        upcoming = "\n".join(f"`{gameday.channel_name(g)}` · {gameday.kickoff_text(g)} · opens {_mt(gameday.open_at(g))}"
+                             for g in nxt) or "No upcoming games on ESPN."
+    except Exception as e:
+        upcoming = f"⚠️ ESPN schedule fetch failed: `{e}`"
+    embed.add_field(name="Next up", value=upcoming[:1024], inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="gameday-open", description="Open the next game's channel now (catch-up or early open)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(sport="Which sport's next game")
+@app_commands.choices(sport=[app_commands.Choice(name="Football", value="football"),
+                             app_commands.Choice(name="Basketball", value="basketball")])
+async def gameday_open(interaction: discord.Interaction, sport: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            games = await gameday.fetch_schedule(session)
+    except Exception as e:
+        await interaction.followup.send(f"ESPN schedule fetch failed: `{e}`", ephemeral=True)
+        return
+    nxt = next((g for g in games if g["sport"] == sport.value and g["state"] in ("pre", "in")), None)
+    if not nxt:
+        await interaction.followup.send(f"No upcoming {sport.name.lower()} game on ESPN.", ephemeral=True)
+        return
+    if gameday.DRY_RUN:
+        db.gameday_upsert(nxt["event_id"], dry_run_note=None)
+    channel = await open_gameday_channel(nxt)
+    await interaction.followup.send(
+        f"Opened {channel.mention}." if channel else "Not opened; the admin log says why (dry run?).", ephemeral=True)
+
+
+@bot.tree.command(name="gameday-close", description="Archive and delete a game-day channel now")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The game-day channel to archive and delete")
+async def gameday_close(interaction: discord.Interaction, channel: discord.TextChannel):
+    await interaction.response.defer(ephemeral=True)
+    row = db.gameday_row_by_channel(str(channel.id))
+    if not row:
+        await interaction.followup.send(f"{channel.mention} isn't a game-day channel this bot opened, so it "
+                                        "won't be touched.", ephemeral=True)
+        return
+    ok = await close_gameday_channel(row)
+    await interaction.followup.send("Archived and deleted; transcript is in the admin log." if ok
+                                    else "Not deleted. The admin log says why.", ephemeral=True)
 
 
 @bot.tree.command(name="tier-history", description="Show recent tier changes")

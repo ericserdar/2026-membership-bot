@@ -1267,3 +1267,65 @@ def forget_sponsor_notice(sub_id: int, kind: str):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM sponsor_notices WHERE sub_id = ? AND kind = ?", (sub_id, kind))
         conn.commit()
+
+
+# ── Game-day channels ─────────────────────────────────────────────────────────
+# One row per BYU game the bot has acted on, keyed by ESPN event id. Close only
+# ever deletes a channel listed here, so a hand-made channel can never be
+# deleted by the scheduler. (The older gameday_channels table from the Sep 2026
+# version stays on the volume as a record; this one replaces it.)
+
+def _init_gameday_games(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gameday_games (
+            event_id     TEXT PRIMARY KEY,
+            sport        TEXT,
+            opponent     TEXT,
+            kickoff      TEXT,      -- ISO UTC
+            channel_id   TEXT,      -- NULL until opened (or for a dry run)
+            opened_at    TEXT,
+            ended_at     TEXT,      -- when ESPN first reported it final (or the fallback)
+            close_at     TEXT,      -- ISO UTC; set once ended_at is known
+            closed_at    TEXT,
+            dry_run_note TEXT       -- 'open' / 'close' once a dry-run notice was posted
+        )
+    """)
+
+
+def gameday_get(event_id: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_gameday_games(conn)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM gameday_games WHERE event_id = ?", (event_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def gameday_upsert(event_id: str, **fields):
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_gameday_games(conn)
+        conn.execute("INSERT OR IGNORE INTO gameday_games (event_id) VALUES (?)", (event_id,))
+        if fields:
+            cols = ", ".join(f"{k} = ?" for k in fields)
+            conn.execute(f"UPDATE gameday_games SET {cols} WHERE event_id = ?", (*fields.values(), event_id))
+        conn.commit()
+
+
+def gameday_open_rows() -> list[dict]:
+    """Channels the bot opened that it hasn't closed yet."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_gameday_games(conn)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM gameday_games WHERE channel_id IS NOT NULL AND closed_at IS NULL ORDER BY kickoff"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def gameday_row_by_channel(channel_id: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_gameday_games(conn)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM gameday_games WHERE channel_id = ? AND closed_at IS NULL", (str(channel_id),)
+        ).fetchone()
+    return dict(row) if row else None
