@@ -1202,6 +1202,24 @@ def _gameday_opener(game: dict) -> str:
     )
 
 
+async def _gameday_sync_raw_overwrites(channel_id: int, ref_id: int) -> list[str]:
+    """Make channel_id's ROLE overwrites bit-for-bit equal to ref_id's. Returns problems left."""
+    def roles_of(raw):
+        return {o["id"]: (str(o["allow"]), str(o["deny"])) for o in raw["permission_overwrites"] if o["type"] == 0}
+    want = roles_of(await bot.http.get_channel(ref_id))
+    got = roles_of(await bot.http.get_channel(channel_id))
+    for rid, (allow, deny) in want.items():
+        if got.get(rid) != (allow, deny):
+            await bot.http.edit_channel_permissions(channel_id, rid, allow, deny, 0,
+                                                    reason="Match reference channel access")
+    for rid in set(got) - set(want):
+        await bot.http.delete_channel_permissions(channel_id, rid, reason="Match reference channel access")
+    after = roles_of(await bot.http.get_channel(channel_id))
+    guild = get_guild()
+    return [f"access differs for role `{guild.get_role(int(r)).name if guild and guild.get_role(int(r)) else r}`"
+            for r in set(want) | set(after) if want.get(r) != after.get(r)]
+
+
 async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextChannel | None:
     """Create this game's channel. Safe to call twice: the DB row short-circuits.
     force=True creates it for real even in dry run."""
@@ -1260,16 +1278,16 @@ async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextC
                       opened_at=_iso(dt.now(timezone.utc)))
     automod.CHANNEL_IDS.add(channel.id)
 
-    # Check the result: same category and the same role rules as the reference channel.
+    # discord.py 2.3 drops permission bits it doesn't know (Pin Messages, Bypass
+    # Slowmode, Send Polls), so re-apply the reference channel's role overwrites
+    # from raw API values, then check the result against them.
     problems = []
     if channel.category_id != category.id:
         problems.append(f"landed in category `{channel.category}` instead of `{category.name}`")
-    want = {t.id: o.pair() for t, o in ref.overwrites.items() if isinstance(t, discord.Role)}
-    got = {t.id: o.pair() for t, o in channel.overwrites.items() if isinstance(t, discord.Role)}
-    diff = [guild.get_role(r).name if guild.get_role(r) else str(r)
-            for r in set(want) | set(got) if want.get(r) != got.get(r)]
-    if diff:
-        problems.append("access differs from " + ref.name + " for: " + ", ".join(diff))
+    try:
+        problems += await _gameday_sync_raw_overwrites(channel.id, ref.id)
+    except Exception as e:
+        problems.append(f"couldn't verify its access rules (`{e}`)")
     if problems:
         await gameday_alert(f"verify:{channel.id}", f"{channel.mention} opened but " + "; ".join(problems) + ".")
 
