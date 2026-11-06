@@ -1146,7 +1146,7 @@ GAMEDAY_AUTOMOD_MODE = os.getenv("GAMEDAY_AUTOMOD_MODE", "live").strip().lower()
 GAMEDAY_CHANNEL_IDS: set[int] = set()   # open game-day channels (kept with automod.CHANNEL_IDS)
 # Automatic timeouts in game-day channels climb this ladder (minutes), one step
 # per strike in the last GAMEDAY_STRIKE_WINDOW_DAYS; the last step repeats.
-GAMEDAY_TIMEOUT_LADDER = [int(x) for x in os.getenv("GAMEDAY_TIMEOUT_LADDER", "1,5,5,10,10,30,60").split(",") if x.strip().isdigit()] or [1]
+GAMEDAY_TIMEOUT_LADDER = [int(x) for x in os.getenv("GAMEDAY_TIMEOUT_LADDER", "1,5,5,10,10,10,30,60").split(",") if x.strip().isdigit()] or [1]
 GAMEDAY_STRIKE_WINDOW_DAYS = float(os.getenv("GAMEDAY_STRIKE_WINDOW_DAYS", "30"))
 # A removed post is a strike too (delete + timeout). 0 = removals only delete.
 GAMEDAY_TIMEOUT_ON_REMOVE = os.getenv("GAMEDAY_TIMEOUT_ON_REMOVE", "1").strip().lower() in ("1", "true", "yes", "on")
