@@ -1151,6 +1151,11 @@ GAMEDAY_STRIKE_WINDOW_DAYS = float(os.getenv("GAMEDAY_STRIKE_WINDOW_DAYS", "30")
 # A removed post is a strike too (delete + timeout). 0 = removals only delete.
 GAMEDAY_TIMEOUT_ON_REMOVE = os.getenv("GAMEDAY_TIMEOUT_ON_REMOVE", "1").strip().lower() in ("1", "true", "yes", "on")
 
+# One ping per opening, in #cougconnect-announcements: @everyone while
+# GAMEDAY_ANNOUNCE_EVERYONE=1, otherwise the opt-in Game Day Pings role
+# (onboarding.json ping_roles.gameday). Everything else about an opening is silent.
+GAMEDAY_ANNOUNCE_EVERYONE = os.getenv("GAMEDAY_ANNOUNCE_EVERYONE", "0").strip().lower() in ("1", "true", "yes", "on")
+
 # ESPN event ids to open NOW, for real, even in dry run (manual test / early open).
 GAMEDAY_FORCE_OPEN = {x.strip() for x in os.getenv("GAMEDAY_FORCE_OPEN", "").split(",") if x.strip()}
 
@@ -1328,11 +1333,42 @@ async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextC
         except Exception as e:
             log.error(f"gameday: pointer post failed in #{ref.name}: {e}")
 
+    await _gameday_announce(channel, game)
+
     log.info(f"gameday: opened #{name} ({channel.id})")
     await post_admin_log(f"{gameday.EMOJI.get(game['sport'], '')} **Game-day channel opened**: {channel.mention} "
                          f"({gameday.matchup(game)}). AutoMod: **{GAMEDAY_AUTOMOD_MODE}**"
                          + (" (over-the-line posts are deleted automatically)." if GAMEDAY_AUTOMOD_MODE == "live" else "."))
     return channel
+
+
+async def _gameday_announce(channel: discord.TextChannel, game: dict):
+    """The one ping for an opening. Never fatal: the channel is already open."""
+    ann = bot.get_channel(ob_channel_id("announcements"))
+    role_id = int(ONBOARDING.get("ping_roles", {}).get("gameday", 0) or 0)
+    if GAMEDAY_ANNOUNCE_EVERYONE:
+        ping, allowed = "@everyone", discord.AllowedMentions(everyone=True, roles=False, users=False)
+    elif role_id:
+        ping, allowed = f"<@&{role_id}>", discord.AllowedMentions(everyone=False, roles=[discord.Object(role_id)], users=False)
+    else:
+        return
+    if not ann:
+        await gameday_alert(f"announce:{channel.id}", f"{channel.mention} opened, but the announcement wasn't sent: "
+                            "#cougconnect-announcements isn't in the bot's cache.")
+        return
+    emoji = gameday.EMOJI.get(game["sport"], "")
+    tv = f" · 📺 {game['tv']}" if game.get("tv") else ""
+    optin = (f"\n-# Want only game-day pings? Pick **Game day chats** in [Channels & Roles]({ping_roles_link()})."
+             if GAMEDAY_ANNOUNCE_EVERYONE and role_id else "")
+    try:
+        await ann.send(
+            f"{ping} {emoji} **Game day: {gameday.matchup(game)}**\n"
+            f"🕐 {gameday.kickoff_text(game)}{tv}\n"
+            f"Game-day chat is open: {channel.mention}{optin}",
+            allowed_mentions=allowed,
+        )
+    except Exception as e:
+        await gameday_alert(f"announce:{channel.id}", f"{channel.mention} opened, but the announcement failed: `{e}`")
 
 
 async def _gameday_transcript(channel: discord.TextChannel) -> tuple[str, int]:
