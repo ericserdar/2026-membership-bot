@@ -2991,8 +2991,13 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
         if minutes:
             embed.add_field(name="⏱️ Auto timeout", value=f"**{_mins_label(minutes)}** (strike {strike_no} in "
                             f"{GAMEDAY_STRIKE_WINDOW_DAYS:g} days). **Lift timeout** voids the strike.", inline=False)
-            timeout_line = (f"\n\n⏱️ You're on a **{_mins_label(minutes)} timeout** in the server. "
-                            "Timeouts get longer each time it happens.")
+            # A 1-minute timeout is over before the DM is read, so it gets no DM
+            # (Eric, Nov 6). A removal still DMs about the removal, minus this line.
+            if minutes > 1:
+                timeout_line = (f"\n\n⏱️ You're on a **{_mins_label(minutes)} timeout** in the server. "
+                                "Timeouts get longer each time it happens.")
+            else:
+                embed.add_field(name="DM", value="No timeout DM (1 min).", inline=False)
         else:
             note = f"⚠️ Auto timeout not applied: {problem}."
     if verdict == "timeout":
