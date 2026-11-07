@@ -84,7 +84,6 @@ ALLOW (the vast majority of messages):
 - Sarcasm, irony and absurd hyperbole, especially "insults" aimed at people the community obviously loves (praising someone by pretending to trash them). If the joke reads as a joke, allow it.
 - Griping about fans or posters in general, or about people outside this Discord (X/Twitter accounts, media, other fan bases): "maybe sports isn't for you if you're this miserable", "I hope that guy on X sees this".
 - Scolding the channel's attitude as a whole without singling anyone out ("stop the defeatist garbage and get behind the team"), even if blunt or a little insulting.
-- Calling for a coach to be replaced, argued on performance ("Roderick has to go if the offense keeps stalling") — that is criticism.
 - Mild profanity used for emphasis, not aimed at a person.
 
 REVIEW (genuinely borderline — a human mod will look; the message stays up):
@@ -95,6 +94,7 @@ REVIEW (genuinely borderline — a human mod will look; the message stays up):
 Review is for messages a moderator would actually want to see. Our mods have marked rivalry trash talk, obvious sarcasm, and general griping about fans as false alarms; do not send those to review.
 
 REMOVE (clear violations):
+- Calling for a coach, coordinator, player or staff member to be fired, benched, cut, replaced or "gone", in ANY wording and even when argued on performance ("fire the OC", "Roderick has to go", "bench the QB", "cut him", "time for a new coach", "Kalani needs to be fired"). Use category "personnel_call". Criticizing their decisions without calling for them to go stays ALLOW.
 - Personal attacks or insults aimed at a specific player, coach, staff member, or community member ("[player] is trash, cut him", "you're an idiot", mocking someone's family, body, faith, or background).
 - Attacks on college athletes as people, including telling players to quit, transfer, or "get out", or anything about their personal lives.
 - Trolling or baiting meant to provoke members rather than discuss ("cancel your subs, this program is a joke and so are all of you").
@@ -109,7 +109,9 @@ The <context> block holds the few messages that came before, so you can read rep
 EXAMPLES
 - "Roderick's 3rd-down calls are killing us. Run the ball!" -> allow
 - "We're going to lose by 20 Saturday, calling it now." -> allow
-- "Kalani needs to be on the hot seat if we lose to Utah again." -> allow
+- "Kalani needs to be on the hot seat if we lose to Utah again." -> allow (pressure, not a call to fire him)
+- "Roderick has to go if the offense keeps stalling." -> remove, category personnel_call
+- "Fire Sitake already." -> remove, category personnel_call
 - "Utah fans are the worst lol" -> allow
 - "Literally everyone that has ever passed through those doors is terrible" (about Utah) -> allow (rivalry trash talk)
 - "You're right, Kalani, Weddle, Jay Hill and many others are the scourge of the earth" -> allow (obvious sarcasm)
@@ -136,7 +138,7 @@ Return JSON with:
 GAMEDAY_ADDENDUM = """GAME-DAY CHANNEL: STRICTER RULES. This message is in a live game-day chat. The rules below OVERRIDE anything above that conflicts with them. Game-day chat is for cheering and reacting to the game, and moderators are not watching, so you enforce these yourself.
 
 REMOVE also (in addition to every REMOVE rule above):
-- Calling for a coach, coordinator, player or staff member to be fired, benched, cut, replaced or "gone", in any wording ("fire the OC", "bench him", "Roderick has to go", "time for a new coach"). On game day this is removed even when it's argued on performance.
+- (Calls to fire, bench, cut or replace someone are already REMOVE with category "personnel_call" under the main rules.)
 
 TIMEOUT (new level, between allow and remove; the message STAYS UP and the author gets a short cooldown):
 - Shaming or demeaning the team, the program or its performance as a whole, without targeting a named person: "this is embarrassing", "pathetic", "what a disgrace", "we're a joke", "this team is soft", "absolute clown show".
@@ -160,7 +162,7 @@ OUTPUT_SCHEMA = {
         "category": {
             "type": "string",
             "enum": ["none", "personal_attack", "athlete_attack", "member_attack", "trolling",
-                     "doom_spiral", "pile_on", "harassment", "borderline"],
+                     "doom_spiral", "pile_on", "harassment", "borderline", "personnel_call"],
         },
         "reason": {"type": "string"},
         "tone": {"type": "string", "enum": ["positive", "neutral", "frustrated", "hostile"]},
@@ -172,7 +174,7 @@ OUTPUT_SCHEMA = {
 
 GAMEDAY_OUTPUT_SCHEMA = json.loads(json.dumps(OUTPUT_SCHEMA))
 GAMEDAY_OUTPUT_SCHEMA["properties"]["verdict"]["enum"] = list(GAMEDAY_VERDICTS)
-GAMEDAY_OUTPUT_SCHEMA["properties"]["category"]["enum"] += ["personnel_call", "team_shaming"]
+GAMEDAY_OUTPUT_SCHEMA["properties"]["category"]["enum"] += ["team_shaming"]
 
 # ── Channel mood monitor ──────────────────────────────────────────────────────
 # Per-message removal only catches attacks. Post-loss pile-ups are hundreds of

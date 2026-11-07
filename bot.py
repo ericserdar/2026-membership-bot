@@ -2891,10 +2891,11 @@ def _mins_label(m: int) -> str:
     return f"{m} min" if m < 60 else f"{m // 60} hr" if m % 60 == 0 else f"{m} min"
 
 
-async def _gameday_strike(member, flag_id: int, reason: str) -> tuple[int | None, int, str | None]:
-    """Next step on the timeout ladder. Returns (minutes or None if it failed, strike number, problem)."""
+async def _gameday_strike(member, flag_id: int, reason: str, min_step: int = 0) -> tuple[int | None, int, str | None]:
+    """Next step on the timeout ladder. Returns (minutes or None if it failed, strike number, problem).
+    min_step skips the bottom of the ladder (a firing call starts at step 1 = 5 min)."""
     prior = db.count_strikes(str(member.id), GAMEDAY_STRIKE_WINDOW_DAYS)
-    minutes = GAMEDAY_TIMEOUT_LADDER[min(prior, len(GAMEDAY_TIMEOUT_LADDER) - 1)]
+    minutes = GAMEDAY_TIMEOUT_LADDER[min(max(prior, min_step), len(GAMEDAY_TIMEOUT_LADDER) - 1)]
     if not isinstance(member, discord.Member):
         return None, prior + 1, "author isn't a server member anymore"
     try:
@@ -2935,8 +2936,11 @@ def _automod_mode_for(channel) -> str:
 async def _automod_act(message: discord.Message, result: dict, edited_from: str | None = None):
     verdict = result["verdict"]
     mode = _automod_mode_for(message.channel)
-    live = mode in ("live", "review")              # real cards (not [SHADOW])
-    auto_remove = mode == "live"                   # only "live" deletes on its own
+    # Calls to fire/bench/cut someone are deleted + timed out in EVERY watched
+    # channel, even where AutoMod is otherwise shadow-only (Eric, Nov 7 2026).
+    firing = verdict == "remove" and result.get("category") == "personnel_call"
+    live = mode in ("live", "review") or firing    # real cards (not [SHADOW])
+    auto_remove = mode == "live" or firing         # only "live" (or a firing call) deletes on its own
     history = db.get_author_flag_history(str(message.author.id), days=30)  # before this flag is logged
     channel = message.channel
     attachments = ", ".join(a.url for a in message.attachments)
@@ -2986,8 +2990,9 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     # Game-day strike: timeouts always, removals too unless GAMEDAY_TIMEOUT_ON_REMOVE=0.
     # An edit never adds a second strike for the same message.
     timeout_line = ""
-    if gameday_live and edited_from is None and (verdict == "timeout" or (verdict == "remove" and GAMEDAY_TIMEOUT_ON_REMOVE)):
-        minutes, strike_no, problem = await _gameday_strike(message.author, flag_id, result.get("reason") or verdict)
+    if edited_from is None and (firing or (gameday_live and (verdict == "timeout" or (verdict == "remove" and GAMEDAY_TIMEOUT_ON_REMOVE)))):
+        minutes, strike_no, problem = await _gameday_strike(message.author, flag_id, result.get("reason") or verdict,
+                                                            min_step=1 if firing else 0)
         if minutes:
             embed.add_field(name="⏱️ Auto timeout", value=f"**{_mins_label(minutes)}** (strike {strike_no} in "
                             f"{GAMEDAY_STRIKE_WINDOW_DAYS:g} days). **Lift timeout** voids the strike.", inline=False)
