@@ -30,7 +30,7 @@ ENABLED = _flag("AUTOMOD_ENABLED")
 # "live"   = like review, plus "remove" verdicts are deleted automatically (with a DM).
 MODE = os.getenv("AUTOMOD_MODE", "log").strip().lower()
 AUTO_REMOVE = MODE == "live"
-# Cards nobody handles within this many hours are cleared from #admin-moderators (0 = never).
+# Cards nobody handles within this many hours are cleared from the bot-flags channel (0 = never).
 CARD_EXPIRE_H = float(os.getenv("AUTOMOD_CARD_EXPIRE_H", "48"))
 MODEL = os.getenv("AUTOMOD_MODEL", "claude-haiku-5-5").strip()
 CHANNEL_IDS = {

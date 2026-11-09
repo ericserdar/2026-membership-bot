@@ -114,6 +114,10 @@ def _flag(name: str) -> bool:
 # log channel + DB, then deleted. Only members with Manage Messages can trigger it.
 FLAG_EMOJI = os.getenv("FLAG_EMOJI", "🚩")
 MOD_LOG_CHANNEL_ID = int(os.getenv("DISCORD_MOD_LOG_CHANNEL_ID", "1189800941793333389"))  # #admin-moderators
+# Every bot FLAG (🚩 member flags, AutoMod review cards, mood monitor, AutoMod weekly
+# digest) goes to its own admin+mod-only channel so #admin-moderators stays readable.
+# Unset -> falls back to #admin-moderators, so nothing is lost before it's configured.
+FLAG_LOG_CHANNEL_ID = int(os.getenv("DISCORD_FLAG_LOG_CHANNEL_ID", "0")) or MOD_LOG_CHANNEL_ID
 
 FAQ_PATH = os.path.join(os.path.dirname(__file__), "faq.json")
 SPONSORS_PATH = os.path.join(os.path.dirname(__file__), "sponsors.json")
@@ -1048,16 +1052,25 @@ class CougConnectBot(commands.Bot):
         """Clear AutoMod cards nobody handled in AUTOMOD_CARD_EXPIRE_H hours. Counted as 'expired', never graded."""
         if automod.CARD_EXPIRE_H <= 0:
             return
-        channel = self.get_channel(MOD_LOG_CHANNEL_ID)
-        if channel is None:
+        # Cards posted before flags moved to their own channel still sit in
+        # #admin-moderators — try the flag channel first, then the old one.
+        channels = [c for c in (self.get_channel(FLAG_LOG_CHANNEL_ID), self.get_channel(MOD_LOG_CHANNEL_ID)) if c is not None]
+        channels = list({c.id: c for c in channels}.values())
+        if not channels:
             return
         for row in db.get_stale_automod_cards(automod.CARD_EXPIRE_H):
-            try:
-                await channel.get_partial_message(int(row["card_message_id"])).delete()
-            except discord.NotFound:
-                pass
-            except (discord.Forbidden, discord.HTTPException) as e:
-                log.error(f"automod: couldn't clear stale card for flag #{row['id']}: {e}")
+            failed = False
+            for channel in channels:
+                try:
+                    await channel.get_partial_message(int(row["card_message_id"])).delete()
+                    break
+                except discord.NotFound:
+                    continue
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    log.error(f"automod: couldn't clear stale card for flag #{row['id']}: {e}")
+                    failed = True
+                    break
+            if failed:
                 continue
             db.set_flag_status(row["id"], "shadow_expired" if row["status"] == "shadow" else "expired")
             db.log_automod_action(row["id"], "expired", str(self.user.id), "AutoMod (no one handled it)",
@@ -1070,10 +1083,10 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc))  # 9am MST / 10am MDT
     async def automod_digest_task(self):
-        """Monday AutoMod recap to #admin-moderators."""
+        """Monday AutoMod recap to the bot-flags channel."""
         if dt.now(timezone.utc).weekday() != 0 or not automod.ENABLED:
             return
-        channel = self.get_channel(MOD_LOG_CHANNEL_ID)
+        channel = self.get_channel(FLAG_LOG_CHANNEL_ID)
         if channel is None:
             return
         try:
@@ -2859,7 +2872,7 @@ async def _mood_act(channel: discord.TextChannel, hit: dict):
                     f"Would post a reminder + {automod.MOOD_SLOWMODE_S}s slowmode for {int(automod.MOOD_SLOWMODE_MIN)} min", inline=True)
     embed.add_field(name="Reminder text", value=reminder[:1024], inline=False)
     embed.set_footer(text=f"Won't fire again in this channel for {int(automod.MOOD_COOLDOWN_MIN)} min")
-    log_channel = bot.get_channel(MOD_LOG_CHANNEL_ID)
+    log_channel = bot.get_channel(FLAG_LOG_CHANNEL_ID)
     if log_channel:
         try:
             await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
@@ -3045,7 +3058,7 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     else:
         view = AutoModReviewView()
 
-    log_channel = bot.get_channel(MOD_LOG_CHANNEL_ID)
+    log_channel = bot.get_channel(FLAG_LOG_CHANNEL_ID)
     if log_channel:
         try:
             card = await log_channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
@@ -3324,7 +3337,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         embed.add_field(name="Attachments", value=attachments[:1024], inline=False)
     embed.set_footer(text=f"Flag #{flag_id}")
 
-    log_channel = bot.get_channel(MOD_LOG_CHANNEL_ID)
+    log_channel = bot.get_channel(FLAG_LOG_CHANNEL_ID)
     if log_channel:
         try:
             await log_channel.send(embed=embed, view=FlagReasonView())
