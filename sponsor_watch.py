@@ -26,6 +26,7 @@ Env:
     SPONSOR_INTAKE_FORM_URL  default https://sponsors.zapier.app/
 """
 
+import asyncio
 import html
 import os
 from datetime import datetime, timedelta, timezone
@@ -90,12 +91,27 @@ def _parse_dt(value: str) -> datetime | None:
         return None
 
 
+# WordPress.com's edge answers a burst of back-to-back API calls with 429 Too Many
+# Requests (an HTML page, not JSON). The sweep makes one transactions call per
+# sponsor sub, so it must pace itself and back off on 429 or it fails every run.
+PACE_SECONDS = 1.0
+RETRY_WAITS = (5, 15, 45)
+
+
 async def _get(session: aiohttp.ClientSession, path: str, params: dict) -> list:
-    async with session.get(mp._api(path), headers={"MEMBERPRESS-API-KEY": mp.MP_KEY}, params=params,
-                           timeout=aiohttp.ClientTimeout(total=30)) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"MemberPress {path} → {resp.status}: {(await resp.text())[:200]}")
-        return await resp.json()
+    for attempt in range(len(RETRY_WAITS) + 1):
+        async with session.get(mp._api(path), headers={"MEMBERPRESS-API-KEY": mp.MP_KEY}, params=params,
+                               timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 429 and attempt < len(RETRY_WAITS):
+                retry_after = resp.headers.get("Retry-After", "")
+                wait = int(retry_after) if retry_after.isdigit() else RETRY_WAITS[attempt]
+                await asyncio.sleep(min(wait, 120))
+                continue
+            if resp.status != 200:
+                raise RuntimeError(f"MemberPress {path} → {resp.status}: {(await resp.text())[:200]}")
+            data = await resp.json()
+        await asyncio.sleep(PACE_SECONDS)
+        return data
 
 
 async def fetch_sponsor_subs() -> list[dict]:
