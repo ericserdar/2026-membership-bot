@@ -56,6 +56,8 @@ log = logging.getLogger("cougconnect")
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+# Sponsor spotlight days (weekday -> slot within the week): Monday, Thursday.
+SPONSOR_SPOTLIGHT_DAYS = {0: 0, 3: 1}
 VERIFY_CHANNEL_ID = int(os.getenv("DISCORD_VERIFY_CHANNEL_ID", "0"))
 UNSUBSCRIBED_CHANNEL_ID = int(os.getenv("DISCORD_UNSUBSCRIBED_CHANNEL_ID", "1360788474374000700"))
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("DISCORD_ADMIN_LOG_CHANNEL_ID", "1493610618094227577"))
@@ -818,14 +820,20 @@ class CougConnectBot(commands.Bot):
 
     @tasks.loop(time=datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc))  # ~10am MT
     async def sponsor_spotlight_task(self):
-        """Weekly sponsor spotlight in the general channel (Wednesdays, rotating)."""
-        if dt.now(timezone.utc).weekday() != 2:  # Wednesday
+        """Sponsor spotlight in the general channel, twice a week (Mon + Thu), rotating.
+
+        Each week has two slots; slot n = week*2 + (0 Mon | 1 Thu), so consecutive
+        spotlights walk sponsors.json in order with no repeats until the list wraps.
+        """
+        today = dt.now(timezone.utc)
+        slot_of_day = SPONSOR_SPOTLIGHT_DAYS.get(today.weekday())
+        if slot_of_day is None:
             return
         sponsors = _load_json(SPONSORS_PATH)
         channel = self.get_channel(GENERAL_CHANNEL_ID)
         if not sponsors or not channel:
             return
-        sponsor = sponsors[dt.now(timezone.utc).isocalendar().week % len(sponsors)]
+        sponsor = sponsors[(today.isocalendar().week * 2 + slot_of_day) % len(sponsors)]
         url = (sponsor.get("url") or "").strip() or None
         description = sponsor.get("blurb", "")
         if url:
