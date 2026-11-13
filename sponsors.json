@@ -26,5 +26,19 @@
     "email": "dutchpatt@icloud.com",
     "discord_id": null,
     "url": null
+  },
+  {
+    "name": "EverScent",
+    "blurb": "Whole-home scenting that runs through your HVAC vents and covers up to 5,000 sq ft, set from your phone. CougConnect fans get 50% off the Starter Pack, and part of every sale goes to the CougConnect fund for the players.",
+    "email": "mark.morrell@me.com",
+    "discord_id": null,
+    "url": "https://everscent.com/cougconnect"
+  },
+  {
+    "name": "Kava Krave",
+    "blurb": "Citrus berry kava drink mix in grab-and-go stick packs, a non-alcoholic way to wind down (adults 18+). Take 10% off one-time orders with code COUGS.",
+    "email": "logan@loganation.com",
+    "discord_id": null,
+    "url": "https://kavakrave.com/"
   }
 ]
