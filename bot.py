@@ -2450,7 +2450,7 @@ _CATEGORY_LABELS = {
     "personal_attack": "Personal attack", "athlete_attack": "Attack on an athlete",
     "member_attack": "Attack on a member", "trolling": "Trolling / baiting",
     "doom_spiral": "Doom-spiral", "pile_on": "Pile-on", "harassment": "Harassment",
-    "borderline": "Borderline", "none": "—",
+    "borderline": "Borderline", "coach_insult": "Insult of a BYU coach", "none": "—",
 }
 
 
