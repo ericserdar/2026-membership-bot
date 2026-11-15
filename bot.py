@@ -2450,7 +2450,8 @@ _CATEGORY_LABELS = {
     "personal_attack": "Personal attack", "athlete_attack": "Attack on an athlete",
     "member_attack": "Attack on a member", "trolling": "Trolling / baiting",
     "doom_spiral": "Doom-spiral", "pile_on": "Pile-on", "harassment": "Harassment",
-    "borderline": "Borderline", "coach_insult": "Insult of a BYU coach", "none": "—",
+    "borderline": "Borderline", "coach_insult": "Insult of a BYU coach",
+    "team_shaming": "Shaming the team", "team_hate": "Hating on the team", "personnel_call": "Firing/benching call", "none": "—",
 }
 
 
@@ -2959,7 +2960,8 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     mode = _automod_mode_for(message.channel)
     # Calls to fire/bench/cut someone are deleted + timed out in EVERY watched
     # channel, even where AutoMod is otherwise shadow-only (Eric, Nov 7 2026).
-    firing = verdict == "remove" and result.get("category") == "personnel_call"
+    # Same for "I hate this team"-type posts (Eric, Nov 14 2026).
+    firing = verdict == "remove" and result.get("category") in ("personnel_call", "team_hate")
     live = mode in ("live", "review") or firing    # real cards (not [SHADOW])
     auto_remove = mode == "live" or firing         # only "live" (or a firing call) deletes on its own
     history = db.get_author_flag_history(str(message.author.id), days=30)  # before this flag is logged
@@ -3013,7 +3015,7 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     timeout_line = ""
     if edited_from is None and (firing or (gameday_live and (verdict == "timeout" or (verdict == "remove" and GAMEDAY_TIMEOUT_ON_REMOVE)))):
         minutes, strike_no, problem = await _gameday_strike(message.author, flag_id, result.get("reason") or verdict,
-                                                            min_step=1 if firing else 0)
+                                                            min_step=1 if result.get("category") == "personnel_call" else 0)
         if minutes:
             embed.add_field(name="⏱️ Auto timeout", value=f"**{_mins_label(minutes)}** (strike {strike_no} in "
                             f"{GAMEDAY_STRIKE_WINDOW_DAYS:g} days). **Lift timeout** voids the strike.", inline=False)
