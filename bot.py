@@ -123,6 +123,12 @@ FLAG_LOG_CHANNEL_ID = int(os.getenv("DISCORD_FLAG_LOG_CHANNEL_ID", "0")) or MOD_
 
 FAQ_PATH = os.path.join(os.path.dirname(__file__), "faq.json")
 SPONSORS_PATH = os.path.join(os.path.dirname(__file__), "sponsors.json")
+# Football 101 weekly breakdown: one diagram + breakdown every Monday in #general.
+# Only queue entries with status "approved" are ever posted (Eric signs off on copy).
+F101_WEEKLY_PATH = os.path.join(os.path.dirname(__file__), "f101_weekly.json")
+F101_WEEKLY_CHANNEL_ID = int(os.getenv("DISCORD_F101_WEEKLY_CHANNEL_ID", "0")) or GENERAL_CHANNEL_ID
+F101_WEEKLY_DRY_RUN = os.getenv("F101_WEEKLY_DRY_RUN", "0") == "1"   # log to admin log instead of posting
+F101_WEEKLY_WINDOW_UTC = (15, 18)   # Monday 15:00-18:00 UTC (8am MST / 9am MDT start); retries inside the window only
 APARTMENTS_PATH = os.path.join(os.path.dirname(__file__), "apartments.json")
 
 # Maps MemberPress apartment dropdown slug → {label, role_name, role_id}.
@@ -291,6 +297,7 @@ class CougConnectBot(commands.Bot):
         self.milestone_task.start()
         self.upgrade_nudge_task.start()
         self.sponsor_spotlight_task.start()
+        self.f101_weekly_task.start()
         self.weekly_digest_task.start()
         self.news_task.start()
         self.onboarding_drip_task.start()
@@ -863,6 +870,70 @@ class CougConnectBot(commands.Bot):
 
     @sponsor_spotlight_task.before_loop
     async def before_sponsor_spotlight(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=30)
+    async def f101_weekly_task(self):
+        """Football 101 weekly breakdown: the next approved concept, Mondays in #general.
+
+        Runs every 30 minutes but only acts on Mondays inside F101_WEEKLY_WINDOW_UTC.
+        The ISO week is recorded BEFORE moving on, so a restart, a retry or a second
+        replica can never post twice in one week. Posts are silent (no pings) and the
+        lesson link is wrapped in <> so Discord shows the GIF, not a link card.
+        """
+        now = dt.now(timezone.utc)
+        if now.weekday() != 0 or not (F101_WEEKLY_WINDOW_UTC[0] <= now.hour < F101_WEEKLY_WINDOW_UTC[1]):
+            return
+        y, w, _ = now.isocalendar()
+        iso_week = f"{y}-W{w:02d}"
+        if db.f101_weekly_posted(iso_week):
+            return
+        try:
+            with open(F101_WEEKLY_PATH) as fh:
+                queue = json.load(fh).get("weeks", [])
+        except Exception as e:
+            log.error(f"F101 weekly: can't read queue: {e}")
+            return
+        used = db.f101_weekly_used()
+        item = next((q for q in sorted(queue, key=lambda q: q["week"]) if q.get("status") == "approved" and q["week"] not in used), None)
+        admin = self.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if not item:
+            db.f101_weekly_record(iso_week, 0, "queue-empty", None)
+            if admin:
+                await admin.send("📚 Football 101 weekly: no approved breakdowns left in the queue, nothing posted this Monday.")
+            return
+        text = re.sub(r"(https?://\S+)\s*$", r"<\1>", item["text"].strip())
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(item["gif_url"], timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                    resp.raise_for_status()
+                    gif = await resp.read()
+        except Exception as e:
+            log.error(f"F101 weekly: GIF download failed for {item['id']}: {e}")
+            return   # try again in 30 minutes, still inside the window
+        if F101_WEEKLY_DRY_RUN:
+            db.f101_weekly_record(iso_week, item["week"], item["id"], None)
+            if admin:
+                await admin.send(f"📚 F101 weekly DRY RUN, would post week {item['week']} ({item['id']}) to <#{F101_WEEKLY_CHANNEL_ID}>:\n\n{text}",
+                                 file=discord.File(io.BytesIO(gif), filename=f"{item['id']}.gif"), silent=True)
+            return
+        channel = self.get_channel(F101_WEEKLY_CHANNEL_ID)
+        if not channel:
+            log.error("F101 weekly: channel not found")
+            return
+        try:
+            msg = await channel.send(text, file=discord.File(io.BytesIO(gif), filename=f"{item['id']}.gif"),
+                                     silent=True, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            log.error(f"F101 weekly: post failed for {item['id']}: {e}")
+            return
+        db.f101_weekly_record(iso_week, item["week"], item["id"], str(msg.id))
+        log.info(f"F101 weekly posted week {item['week']} ({item['id']}) msg {msg.id}")
+        if admin:
+            await admin.send(f"📚 Football 101 weekly posted: **{item['name']}** (queue week {item['week']}) {msg.jump_url}", silent=True)
+
+    @f101_weekly_task.before_loop
+    async def before_f101_weekly(self):
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=14, minute=0, tzinfo=datetime.timezone.utc))  # ~8am MT

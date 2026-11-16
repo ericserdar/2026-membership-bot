@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 DB_PATH = os.environ.get("DB_PATH", "/data/cougconnect.db")
 
@@ -1389,3 +1389,43 @@ def void_strike(flag_id: int) -> dict | None:
                      (datetime.utcnow().isoformat(), row["id"]))
         conn.commit()
         return dict(row)
+
+
+# --- Football 101 weekly breakdown (Monday #general post) -------------------
+# One row per ISO week that got a post, so a restart or retry can never post twice
+# in the same week, and the next concept is simply the lowest approved queue week
+# not in this table.
+
+def _init_f101_weekly(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS f101_weekly (
+            iso_week    TEXT PRIMARY KEY,   -- e.g. '2026-W47'
+            queue_week  INTEGER NOT NULL,   -- week number in f101_weekly.json
+            concept_id  TEXT NOT NULL,
+            message_id  TEXT,               -- NULL for a dry run
+            posted_at   TEXT NOT NULL
+        )
+    """)
+
+
+def f101_weekly_posted(iso_week: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_f101_weekly(conn)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM f101_weekly WHERE iso_week = ?", (iso_week,)).fetchone()
+    return dict(row) if row else None
+
+
+def f101_weekly_used() -> set[int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_f101_weekly(conn)
+        return {r[0] for r in conn.execute("SELECT queue_week FROM f101_weekly WHERE message_id IS NOT NULL")}
+
+
+def f101_weekly_record(iso_week: str, queue_week: int, concept_id: str, message_id: str | None):
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_f101_weekly(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO f101_weekly (iso_week, queue_week, concept_id, message_id, posted_at) VALUES (?, ?, ?, ?, ?)",
+            (iso_week, queue_week, concept_id, message_id, datetime.now(timezone.utc).isoformat()),
+        )

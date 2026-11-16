@@ -1,0 +1,589 @@
+{
+ "_about": "Football 101 Monday breakdowns for #general. The bot posts only status=approved entries, lowest week first. Source of truth: ~/Claude/CougConnect/ops/weekly-breakdown/queue.json (sync with build_bot_queue.py).",
+ "weeks": [
+  {
+   "week": 1,
+   "id": "mesh",
+   "name": "Mesh",
+   "status": "approved",
+   "text": "🏈 **Football 101: Mesh**\n\nTwo receivers run shallow crossing routes from opposite sides & cross so close they almost slap hands about 5 yards downfield\n\nAgainst man coverage the defenders chasing them run right into each other, so one of the crossers comes out a step free & that's all the QB needs\n\nAgainst zone they just sit down in the open windows\n\nThis one has BYU roots too, it's an Air Raid staple that came out of LaVell Edwards' offenses\n\nNext time you're watching, look for two receivers crossing underneath right in front of the linebackers 👀\n\nFull breakdown in Football 101 Essentials, free for every member\n\nhttps://cougconnect.com/courses/football-101-essentials/lessons/essentials-mesh/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-mesh.gif"
+  },
+  {
+   "week": 2,
+   "id": "cover-3",
+   "name": "Cover 3",
+   "status": "approved",
+   "text": "🏈 **Football 101: Cover 3**\n\nThree defenders split the deep field into thirds, the two corners & the free safety\n\nFour more cover zones underneath, so a safety can drop down & add an extra guy against the run\n\nThat's why so many teams live in it, it's safe deep & still sound vs the run\n\nThe way to beat it is to put two receivers on that one middle safety, like four verticals running both seams\n\nNext time you're watching, look for one deep safety & the corners backpedaling at the snap 👀\n\nFull breakdown in Football 101 Essentials, free for every member\n\nhttps://cougconnect.com/courses/football-101-essentials/lessons/essentials-cover-3/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-cover-3.gif"
+  },
+  {
+   "week": 3,
+   "id": "zone-read",
+   "name": "Zone read",
+   "status": "approved",
+   "text": "🏈 **Football 101: Zone read**\n\nIt's inside zone, except the line leaves the backside defensive end unblocked on purpose\n\nThe QB puts the ball in the back's belly & reads that end\n\nIf he stays home, hand it off. If he crashes down on the back, pull it & keep it where he just left\n\nReading a guy instead of blocking him basically gives the offense an extra blocker\n\nDefenses counter w/ a \"scrape exchange\", the end takes the back & a linebacker loops outside for the QB\n\nNext time you're watching, watch the backside end instead of the ball. Whatever he does, the ball goes the other way 👀\n\nFull breakdown in Football 101 Essentials, free for every member\n\nhttps://cougconnect.com/courses/football-101-essentials/lessons/essentials-zone-read/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-zone-read.gif"
+  },
+  {
+   "week": 4,
+   "id": "stunt-exit",
+   "name": "E-T twist (\"EXIT\")",
+   "status": "approved",
+   "text": "🏈 **Football 101: The EXIT stunt**\n\nThis one's up front. The defensive end sells a speed rush for two steps, then cuts hard inside through the guard\n\nThe tackle waits until the end goes past him, then loops around the outside & takes over contain\n\nIt punishes an offensive tackle who sets too wide to stop the speed rush, the inside opens up & then the looper comes around where the end used to be\n\nThe fix is the guard staying tight to his tackle & the line passing the end inside, then kicking back out to the looper\n\nNext time you're watching, look for a defensive end who takes two steps upfield & then suddenly cuts inside 👀\n\nFull breakdown in Football 101 Essentials, free for every member\n\nhttps://cougconnect.com/courses/football-101-essentials/lessons/essentials-stunt-exit/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-stunt-exit.gif"
+  },
+  {
+   "week": 5,
+   "id": "four-verticals",
+   "name": "Four verticals",
+   "status": "approved",
+   "text": "🏈 **Football 101: Four verticals**\n\nFour receivers run straight downfield\n\nThe outside guys run go routes a couple yards inside the sideline & the slots run the seams\n\nOne deep safety can't cover both seams, so one of them has to come open\n\nThe QB just reads that middle safety & throws to whichever seam he doesn't take\n\nDefenses answer w/ two deep safeties to match the seams, or by getting pressure before the routes develop\n\nNext time you're watching, watch the middle safety. When he picks a side, the ball goes to the other 👀\n\nFull breakdown in Football 101 Essentials, free for every member\n\nhttps://cougconnect.com/courses/football-101-essentials/lessons/essentials-four-verticals/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-four-verticals.gif"
+  },
+  {
+   "week": 6,
+   "id": "cover-2",
+   "name": "Cover 2",
+   "status": "approved",
+   "text": "🏈 **Football 101: Cover 2**\n\nTwo safeties split the deep field in half & five defenders cover zones underneath\n\nThe corners play short, jam the outside receiver & sit on the flat around 5 yards\n\nIt's tough on quick outside throws & keeps two safeties over the top to limit big plays\n\nThe soft spots are behind the squatting corner, the deep middle between the safeties & the sideline hole between the corner & safety\n\nNext time you're watching, look for corners playing tight & not bailing at the snap, w/ both safeties deep 👀\n\nFull breakdown in Football 101 Essentials, free for every member\n\nhttps://cougconnect.com/courses/football-101-essentials/lessons/essentials-cover-2/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-cover-2.gif"
+  },
+  {
+   "week": 7,
+   "id": "power",
+   "name": "Power",
+   "status": "approved",
+   "text": "🏈 **Football 101: Power**\n\nA gap run that puts more blockers than defenders right at the hole\n\nThe playside linemen block down, an H-back or fullback kicks out the end & the backside guard pulls through the hole to lead for the back\n\nThat pulling guard shows up where the defense didn't expect a blocker\n\nDefenses fight it by spilling the kick-out so the run bounces outside, or by blitzing the gap before the puller gets there\n\nNext time you're watching, find the pulling guard. He's taking you to the hole 👀\n\nFull breakdown is in our Run Game course, included w/ Silver & Gold\n\nhttps://cougconnect.com/courses/football-101-run-game/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-power.gif"
+  },
+  {
+   "week": 8,
+   "id": "smash",
+   "name": "Smash",
+   "status": "approved",
+   "text": "🏈 **Football 101: Smash**\n\nThe outside receiver runs a short hitch & the slot runs a corner route right over the top of him\n\nIt's built to beat Cover 2, where one corner has to choose\n\nThe QB reads that corner. If he squats on the hitch, throw the corner route over him. If he sinks, throw the hitch\n\nIn Cover 2 the corner has the flat & the safety is deep, so the corner route lands right between them\n\nTeams answer w/ quarters coverage, where the corner can sink deep\n\nNext time you're watching, watch the corner. Squat or sink? 👀\n\nFull breakdown in Football 101 Essentials, free for every member\n\nhttps://cougconnect.com/courses/football-101-essentials/lessons/essentials-smash/",
+   "gif_url": "https://cougconnect.com/wp-content/uploads/2026/11/f101-weekly-smash.gif"
+  },
+  {
+   "week": 9,
+   "id": "bubble-rpo",
+   "name": "Bubble RPO",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 10,
+   "id": "cover-0",
+   "name": "Cover 0",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 11,
+   "id": "orbit-motion",
+   "name": "Orbit motion",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 12,
+   "id": "lb-take-on",
+   "name": "Linebacker read steps and taking on blocks",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 13,
+   "id": "outside-zone",
+   "name": "Outside zone",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 14,
+   "id": "tampa-2",
+   "name": "Tampa 2",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 15,
+   "id": "red-zone",
+   "name": "The red zone: a compressed field",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 16,
+   "id": "split-zone",
+   "name": "Split zone",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 17,
+   "id": "two-man",
+   "name": "2-Man (Cover 2 man)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 18,
+   "id": "power-read",
+   "name": "Power read (inverted veer)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 19,
+   "id": "drive-block",
+   "name": "Drive (base) block",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 20,
+   "id": "jet-sweep",
+   "name": "Jet sweep",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 21,
+   "id": "palms-trap",
+   "name": "Palms / 2-Read and the trap corner",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 22,
+   "id": "goal-line-offense",
+   "name": "Goal-line offense",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 23,
+   "id": "wide-zone-uc",
+   "name": "Wide zone from under center",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 24,
+   "id": "pattern-matching",
+   "name": "Pattern matching vs spot-drop zone",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 25,
+   "id": "speed-option",
+   "name": "Speed option",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 26,
+   "id": "reach-block",
+   "name": "Reach block",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 27,
+   "id": "triple-option",
+   "name": "Spread triple option (zone read + bubble)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 28,
+   "id": "five-man-blitz",
+   "name": "5-man blitz (Cover 1 behind it)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 29,
+   "id": "tush-push",
+   "name": "QB sneak and the tush push",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 30,
+   "id": "glance-rpo",
+   "name": "Glance RPO",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 31,
+   "id": "qb-spy",
+   "name": "QB spy and the coverage sack",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 32,
+   "id": "stick-rpo",
+   "name": "Stick RPO",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 33,
+   "id": "down-block",
+   "name": "Down block",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 34,
+   "id": "now-rpo",
+   "name": "Now / slant RPO (pre-snap read)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 35,
+   "id": "overload-blitz",
+   "name": "Overload and nickel blitzes",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 36,
+   "id": "punt-coverage",
+   "name": "Punt protection and coverage lanes",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 37,
+   "id": "pop-pass",
+   "name": "Pop pass",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 38,
+   "id": "stunts",
+   "name": "Line stunts (twists)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 39,
+   "id": "bash",
+   "name": "Bash (back away)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 40,
+   "id": "pull-kick",
+   "name": "Pull and kick-out",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 41,
+   "id": "hitch",
+   "name": "Hitches",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 42,
+   "id": "defending-motion",
+   "name": "Defending motion: lock, spin, bump, switch",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 43,
+   "id": "punt-return",
+   "name": "Punt returns and blocks",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 44,
+   "id": "stick",
+   "name": "Stick",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 45,
+   "id": "two-gap",
+   "name": "Two-gap play",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 46,
+   "id": "snag",
+   "name": "Snag",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 47,
+   "id": "pull-wrap",
+   "name": "Pull and wrap (lead through the hole)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 48,
+   "id": "spacing",
+   "name": "Spacing",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 49,
+   "id": "spill-vs-squeeze-def",
+   "name": "Spill vs squeeze",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 50,
+   "id": "bubble-screen",
+   "name": "Bubble screen",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 51,
+   "id": "tunnel-screen",
+   "name": "Tunnel screen",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 52,
+   "id": "trap-block",
+   "name": "Trap block",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 53,
+   "id": "rb-screen",
+   "name": "RB screen",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 54,
+   "id": "y-cross",
+   "name": "Y-cross",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 55,
+   "id": "shallow-cross",
+   "name": "Shallow cross",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 56,
+   "id": "fold-block",
+   "name": "Fold block",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 57,
+   "id": "dagger",
+   "name": "Dagger",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 58,
+   "id": "mills",
+   "name": "Mills (post-dig)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 59,
+   "id": "flood",
+   "name": "Flood (sail)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 60,
+   "id": "kick-slide",
+   "name": "Vertical set (kick slide)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 61,
+   "id": "play-action-post",
+   "name": "Play-action post",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 62,
+   "id": "option-route",
+   "name": "Option and choice routes",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 63,
+   "id": "pa-boot",
+   "name": "Play-action bootleg",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 64,
+   "id": "twist-pickup",
+   "name": "Picking up a twist (pass-off)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 65,
+   "id": "scrape-exchange",
+   "name": "Scrape exchange (vs the zone read)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 66,
+   "id": "wr-release-stalk",
+   "name": "WR release and stalk blocking",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 67,
+   "id": "dl-get-off",
+   "name": "Get-off, hands and pad level",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 68,
+   "id": "reading-run-blocks",
+   "name": "Reading run blocks",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 69,
+   "id": "stunt-crossfire",
+   "name": "Crossfire (crossing linebackers)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 70,
+   "id": "green-dog",
+   "name": "Green dog (hug rush)",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 71,
+   "id": "line-slant",
+   "name": "Slants (\"Ram/Lion\")",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 72,
+   "id": "gap-exchange",
+   "name": "Loop / scrape gap exchange",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  },
+  {
+   "week": 73,
+   "id": "fake-twist",
+   "name": "Fake twist (\"coffeehouse\")",
+   "status": "to-write",
+   "text": null,
+   "gif_url": null
+  }
+ ]
+}
