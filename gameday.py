@@ -132,10 +132,24 @@ def open_at(game: dict) -> datetime.datetime:
     return game["kickoff"] - datetime.timedelta(hours=OPEN_HOURS_BEFORE)
 
 
+# A kickoff outside this window is bad ESPN data, not a game. Nov 17 2026 ESPN briefly
+# sent the Kansas football game (401856866) with a 1993-01-31 date: the bot opened,
+# pinged, archived and deleted its channel in 7 seconds and marked the game closed.
+PLAUSIBLE_PAST = datetime.timedelta(days=2)
+PLAUSIBLE_FUTURE = datetime.timedelta(days=400)
+
+
+def is_plausible(game: dict, now: datetime.datetime) -> bool:
+    return now - PLAUSIBLE_PAST <= game["kickoff"] <= now + PLAUSIBLE_FUTURE
+
+
 def should_open(game: dict, now: datetime.datetime) -> bool:
     """Inside the open window and not already over. A game that's already final
-    never gets a channel, so a late deploy doesn't open a channel for last week."""
-    if game["state"] == "post" or is_called_off(game):
+    (or whose assumed end has passed) never gets a channel, so a late deploy or a
+    bogus ESPN date doesn't open a channel for a game that's over."""
+    if game["state"] == "post" or is_called_off(game) or not is_plausible(game, now):
+        return False
+    if now >= fallback_end(game["sport"], game["kickoff"]):
         return False
     return open_at(game) <= now
 

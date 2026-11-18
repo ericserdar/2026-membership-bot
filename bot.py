@@ -1566,6 +1566,13 @@ async def run_gameday_cycle():
 
     # 1. Open. Only games kicking off in the next OPEN_HOURS_BEFORE; never one already final.
     for g in games.values():
+        if not gameday.is_plausible(g, now) and g["state"] != "post":
+            # Bad ESPN date (e.g. 1993 on Nov 17 2026): never act on it, flag it.
+            await gameday_alert(f"implausible:{g['event_id']}",
+                                f"ESPN sent an implausible kickoff for {gameday.matchup(g)} "
+                                f"(event `{g['event_id']}`): **{_mt(g['kickoff'])} {g['kickoff'].year}**. "
+                                "Skipped; it opens normally once ESPN corrects the date.")
+            continue
         if g["event_id"] in GAMEDAY_FORCE_OPEN and g["state"] != "post":
             row = db.gameday_get(g["event_id"]) or {}
             if not row.get("channel_id") and not row.get("closed_at"):
