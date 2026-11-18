@@ -13,8 +13,10 @@ import json
 import logging
 import os
 import re
+import time
 from collections import deque
 
+import aiohttp
 import anthropic
 
 log = logging.getLogger("cougconnect.automod")
@@ -77,7 +79,11 @@ SYSTEM_PROMPT = """You moderate tone in the CougConnect Discord, a paid communit
 
 THE LINE: criticism is welcome; hostility is not. Our moderators have told us we have been flagging far too much, so lean hard toward ALLOW. Only flag what a moderator would genuinely want to act on.
 
-WHO IS PROTECTED: BYU's own coaches and staff, college athletes (ours AND opponents'), and members of this community. NOT protected: referees/officials, and OPPOSING coaches, coordinators, athletic directors and staff (any school other than BYU, including former BYU coaches now at other schools, e.g. Mark Pope at Kentucky). Insulting, mocking or calling for the firing of a ref or an opposing coach is ALLOW.
+WHO IS PROTECTED: ONLY BYU's own people, meaning the current BYU football and men's basketball players, coaches and staff listed in <byu_people>, plus members of this community. Everyone else is NOT protected: opposing players, opposing coaches and staff, referees/officials, media members, analysts, reporters and podcasters (e.g. RJ Young of Fox Sports), former BYU players and coaches now at other schools (e.g. Mark Pope at Kentucky), and other public figures. Criticizing, mocking or insulting someone who is not protected, including their play, attitude, intelligence, partying, behavior toward reporters, NIL or contract demands, or calling for an opposing coach to be fired, is ALLOW.
+
+HOW TO TELL WHO IS BYU: match full names, last names and nicknames against <byu_people>; "our QB", "our corner", "we" and "us" mean BYU. A person who is not on the list and is not clearly described as a BYU player or coach is NOT BYU: never assume a stranger is one of ours. Watch for shared surnames: Kevin Young is BYU's basketball coach, but RJ Young is a Fox Sports analyst. When the conversation is clearly about another school's player (e.g. Sam Leavitt at LSU), he is an opposing player.
+
+THE FLOOR, FOR EVERYONE (protected or not): threats, wishing or inciting injury or harm ("put a bounty on him"), slurs or hate about race, religion, ethnicity, sex or orientation, sexual content about a real person, and accusations of sexual violence or other serious crimes. These are never allowed, whoever the target is.
 
 ALLOW (the vast majority of messages):
 - Criticism of play-calling, schemes, coaching decisions, roster/recruiting choices, effort, or results — even blunt, frustrated, or sarcastic. "That was the worst half I've seen in years" is allowed.
@@ -88,7 +94,9 @@ ALLOW (the vast majority of messages):
 - Scolding the channel's attitude as a whole without singling anyone out ("stop the defeatist garbage and get behind the team"), even if blunt or a little insulting.
 - Mild profanity used for emphasis, not aimed at a person.
 - Anything about referees and officials, however harsh: "worst ref in the conference", "[ref] is a disgrace", "these refs are crooks / are betting on this game", "fire this crew". Only threats or slurs against a ref are not allowed.
-- Anything about OPPOSING coaches and staff: mocking, insults, jokes about them, "Whittingham is a clown", "Pope is done", "fire their coach".
+- Anything about OPPOSING coaches and staff: mocking, insults, jokes about them, "Whittingham is a clown", "Pope is done", "fire their coach", "Lane Kiffin is a snake".
+- Anything about OPPOSING players: ripping their play, attitude, character or off-field behavior, NIL demands, transfers, mocking them ("Leavitt is a diva", "their QB is trash"), gossip about them that isn't a serious criminal accusation.
+- Anything about media, analysts, reporters, podcasters, X accounts and other public figures: "RJ Young doesn't seem very bright", "that ESPN guy has no clue".
 - Criticism of BYU units or the team's performance, even blunt: "our o-line has sucked the last three drives", "we can't put a full game together", "our D can't tackle", "this is embarrassing". (In game-day chat, sweeping shaming of the team gets a short timeout; see the game-day rules.)
 - Mild exasperated jabs at BYU coaches over a decision ("ARod you joker, punt the ball", "what is Kalani doing", "clueless play-calling"), hypotheticals and jokes about coaching changes ("if Jay gets fired he can consult"), saying a coach should coach differently, "hot seat" talk.
 - Questions or discussion about injuries, health updates, eligibility, transfers, NIL, contracts or money. These are normal fan topics, not personal-life rumors.
@@ -98,18 +106,19 @@ REVIEW (genuinely borderline — a human mod will look; the message stays up):
 - Insulting name-calling of a BYU coach or staff member beyond a mild jab ("Roderick is an idiot", "Kalani is a moron").
 - Heated messages aimed at a SPECIFIC member of this community (by @mention, name, or clear reply) that edge toward personal but aren't clearly an attack.
 - Questioning a specific member's loyalty or worth as a fan ("I have 0 faith you're a real BYU fan").
-- Rumors or speculation about a player's or coach's private life: relationships, family, identifying people in a sensitive personal story, unsourced legal or criminal allegations. (Injuries, eligibility, transfers and money talk are NOT this; allow them.)
-Review is for messages a moderator would actually want to see. Our mods have marked rivalry trash talk, obvious sarcasm, general griping, doom/venting, injury questions, ambiguous fragments, and comments about refs or opposing coaches as false alarms; do not send those to review.
+- Rumors or speculation about a BYU player's or coach's private life: relationships, family, identifying people in a sensitive personal story. (Injuries, illness, a baby on the way, eligibility, transfers and money talk are NOT this; allow them.)
+- Unsourced accusations of a serious crime against ANY named person, BYU or not.
+Review is for messages a moderator would actually want to see. Our mods have marked rivalry trash talk, obvious sarcasm, general griping, doom/venting, injury and illness questions, ambiguous fragments, and comments about refs, opposing coaches, opposing players and media members as false alarms; do not send those to review.
 
 REMOVE (clear violations):
 - A direct call for a BYU coach, coordinator, staff member or player to be fired, benched, cut, replaced or "gone" ("fire the OC", "Roderick has to go", "bench the QB", "time for a new coach", "Kalani needs to be fired"). Use category "personnel_call". This applies to BYU only; the same about an opposing coach is ALLOW. Hypotheticals, jokes, "hot seat" talk, and saying a coach should do something differently are NOT personnel calls.
-- Degrading personal attacks on a BYU coach or staff member, or on any college athlete, or on a community member: mocking someone's family, body, faith or background, or insults like "[player] is trash", "you're an idiot".
-- Attacks on college athletes as people, including telling players to quit, transfer, or "get out", or anything about their personal lives.
+- Degrading personal attacks on a BYU player, coach or staff member, or on a community member: mocking someone's family, body, faith or background, or insults like "[BYU player] is trash", "you're an idiot".
+- Attacks on BYU players as people, including insulting a player while telling them to quit, transfer or "get out" ("he's soft, just transfer already"), or anything about their personal lives. A plain roster opinion that a player should move on, transfer or make room for younger guys, with no insult ("I'd encourage Rex to move on", "time for him to move on after 4 years"), is ALLOW, not an attack and not a personnel call.
 - Trolling or baiting meant to provoke members rather than discuss ("cancel your subs, this program is a joke and so are all of you").
 - Doom-spiraling that tells others to give up or leave ("fire everyone, burn it down, this program is dead, everyone should cancel").
 - Piling on a member who's already being targeted.
 - Hatred, disgust or disowning aimed at BYU / the team as a whole: "I freaking hate this team", "I hate this team", "this team disgusts me", "I'm ashamed of this team", "I'm done with this team, they're garbage", "worst fan base and worst team, I hate them". Use category "team_hate". This is about the fan turning on the team itself; frustration about how the team is PLAYING ("I hate watching this offense", "I hate this play call", "this is embarrassing") is not team_hate. Hating a rival school or opponent is ALLOW.
-- Slurs, threats, or harassment of any kind.
+- Slurs, threats, or harassment of any kind, against anyone (see THE FLOOR).
 
 When unsure between two levels, pick the LESS severe one. A false removal of a real fan is worse than a missed borderline message.
 
@@ -123,7 +132,16 @@ EXAMPLES
 - "Pope is done man" / "Whittingham is a clown, fire him" (opposing coaches) -> allow
 - "Well if Jay gets fired we could keep him on as a consultant" -> allow (hypothetical joke)
 - "Do we have any solid info on how LJ's ankle is doing?" -> allow (injury question)
-- "Someone put a bounty on that player who stepped on his ankle" -> remove (incites harm to an athlete)
+- "Someone put a bounty on that player who stepped on his ankle" -> remove (incites harm; the floor covers opposing players too)
+- "LSU hates Leavitt now. Seen partying two hours after the loss, a jerk to the reporters, and now he wants $7 million? Diabolical" -> allow (opposing player's conduct; he is not BYU)
+- "The thing that stands out about RJ Young is he doesn't seem very bright" -> allow (a Fox Sports analyst, not BYU)
+- "Their QB is a total bum, our D is going to eat him alive" -> allow (opposing player)
+- "Bachmeier is a bum, worst QB in the Big 12" -> remove (attack on a BYU player)
+- "Kevin Young is clueless with these rotations" -> allow (mild jab at a BYU coach's decision)
+- "Rex and Moa should move on" -> allow (roster opinion about BYU players, no insult)
+- "Mboup is so horrible offensively it hurts" -> allow (blunt criticism of a BYU player's PLAY, not of him as a person)
+- "Keanu hasn't had his kid yet right? Could he miss the Kansas game?" -> allow (availability question)
+- "When do we start speculating who 'K.W.' is?" -> review (inviting speculation about who is behind initials in a sensitive story)
 - "We're going to lose by 20 Saturday, calling it now." -> allow
 - "Kalani needs to be on the hot seat if we lose to Utah again." -> allow (pressure, not a call to fire him)
 - "Roderick has to go if the offense keeps stalling." -> remove, category personnel_call
@@ -273,6 +291,80 @@ def worth_checking(text: str) -> bool:
     return len(words) >= MIN_WORDS
 
 
+# ── Who counts as BYU ────────────────────────────────────────────────────────
+# Eric (Nov 17 2026): only OUR players and coaches are protected; opposing
+# players, coaches and media are fair game. byu_people.json (built by
+# ops/build_byu_people.py) holds coaches, staff, players and nicknames; player
+# names are topped up from ESPN once a day so new arrivals are covered between
+# rebuilds. The block is cached with the rubric, so it costs ~nothing per message.
+BYU_PEOPLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "byu_people.json")
+ROSTER_REFRESH_S = 24 * 3600
+_ESPN_ROSTER = "https://site.api.espn.com/apis/site/v2/sports/{path}/teams/252/roster"
+_ROSTER_SPORTS = {"football": "football/college-football", "basketball": "basketball/mens-college-basketball"}
+
+
+def _load_people() -> dict:
+    try:
+        with open(BYU_PEOPLE_PATH) as f:
+            return json.load(f)
+    except Exception as e:
+        log.error(f"automod: couldn't load {BYU_PEOPLE_PATH}: {e!r}; rubric runs without the roster")
+        return {}
+
+
+_people = _load_people()
+_espn_extra: dict[str, set[str]] = {"football": set(), "basketball": set()}
+_roster_checked_at = 0.0
+
+
+def _fmt(e: dict) -> str:
+    bits = [b for b in (e.get("title", ""), ("aka " + ", ".join(e["nicknames"])) if e.get("nicknames") else "") if b]
+    return e["name"] + (f" ({'; '.join(bits)})" if bits else "")
+
+
+def roster_text() -> str:
+    lines = []
+    for sport in ("football", "basketball"):
+        d = _people.get(sport, {})
+        players = list(d.get("players", []))
+        have = {p["name"] for p in players}
+        players += [{"name": n} for n in sorted(_espn_extra.get(sport, ())) if n not in have]
+        if d.get("coaches"):
+            lines.append(f"BYU {sport.upper()} COACHES AND STAFF: " + "; ".join(_fmt(c) for c in d["coaches"]))
+        if players:
+            lines.append(f"BYU {sport.upper()} PLAYERS: " + "; ".join(_fmt(p) for p in players))
+    if not lines:
+        return ""
+    return ("<byu_people>\nThe people AutoMod protects (plus community members). Anyone not here is not BYU unless "
+            "the message clearly says they are.\n" + "\n".join(lines) + "\n</byu_people>")
+
+
+async def _maybe_refresh_roster():
+    """Once a day, add any ESPN-listed BYU player missing from byu_people.json. Never raises."""
+    global _roster_checked_at
+    now = time.monotonic()
+    if _roster_checked_at and now - _roster_checked_at < ROSTER_REFRESH_S:
+        return
+    _roster_checked_at = now
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            for sport, path in _ROSTER_SPORTS.items():
+                async with session.get(_ESPN_ROSTER.format(path=path)) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json(content_type=None)
+                athletes = data.get("athletes", [])
+                if athletes and "items" in athletes[0]:
+                    athletes = [a for group in athletes for a in group["items"]]
+                known = {p["name"] for p in _people.get(sport, {}).get("players", [])}
+                new = {a["fullName"] for a in athletes if a.get("fullName")} - known
+                if new != _espn_extra[sport]:
+                    log.info(f"automod: roster {sport} +{len(new)} from ESPN not in byu_people.json: {sorted(new)[:10]}")
+                _espn_extra[sport] = new
+    except Exception as e:
+        log.warning(f"automod: ESPN roster refresh failed, keeping what we have: {e!r}")
+
+
 def _escape(text: str) -> str:
     # Keep members from closing our tags to smuggle text outside them.
     return text.replace("<", "‹").replace(">", "›")
@@ -297,7 +389,12 @@ async def classify(message_text: str, author: str, channel: str,
                    reply_to: tuple[str, str] | None = None, gameday: bool = False) -> dict | None:
     """Return {verdict, category, reason, dm_text} or None (fail open).
     gameday=True applies the stricter game-day rules and allows the "timeout" verdict."""
-    system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+    await _maybe_refresh_roster()
+    system = [{"type": "text", "text": SYSTEM_PROMPT}]
+    roster = roster_text()
+    if roster:
+        system.append({"type": "text", "text": roster})
+    system[-1]["cache_control"] = {"type": "ephemeral"}
     if gameday:
         system.append({"type": "text", "text": GAMEDAY_ADDENDUM, "cache_control": {"type": "ephemeral"}})
     try:
