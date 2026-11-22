@@ -194,6 +194,34 @@ EXAMPLES (game day)
 For "timeout", dm_text is 1-2 calm, friendly sentences telling the author they're on a short cooldown in game-day chat because the message went after one of our coaches personally or shamed the team (criticizing specific plays and calls is fine). Same tone rules as removals: no lecturing, never mention AI or automation.
 verdict may be "allow", "timeout", "review" or "remove"."""
 
+# Heat mode (Eric, Nov 21 2026): when the mood monitor trips LIVE in a channel, that channel is "hot" for
+# HEAT_MIN minutes and every message there is classified with HEAT_ADDENDUM: quicker to give a short cooldown,
+# same rules on what's allowed. Off unless HEAT_ENABLED=1 (and MOOD_MODE=live, since heat starts from a live trip).
+HEAT_ENABLED = os.getenv("HEAT_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+HEAT_MIN = float(os.getenv("HEAT_MIN", "30"))
+HEAT_TIMEOUT_MIN = int(os.getenv("HEAT_TIMEOUT_MIN", "1"))
+
+HEAT_ADDENDUM = """HEAT MODE. This channel has been running hot: most of the recent messages were frustrated or hostile, and for the next few minutes the goal is to cool it down. Every rule above still applies, and ordinary frustration is still ALLOW: specific criticism of plays, calls, drives or units, predicting a loss, ripping the refs, trashing the opponent and its coaches, rival trash talk. Heat mode is NOT a ban on venting.
+
+While the channel is hot, be quicker to give a short cooldown (verdict "timeout": the message STAYS UP and the author sits out a minute). This OVERRIDES the "review" examples in the rules above: while heat mode is on, any of them that is heated, edging personal or aimed at members becomes "timeout".
+- Anything you would otherwise mark "review" because it's heated, edging personal, piling on, or baiting other members -> "timeout" (keep the category you'd have used).
+- Team shaming of BYU as a group rather than criticism of what's happening ("this is embarrassing", "pathetic", "we suck", "joke of a team", "so soft") -> "timeout", category "team_shaming".
+- Insulting name-calling of a BYU coach or staff member beyond a mild jab -> "timeout", category "coach_insult".
+- Name-calling the people in the chat as a group ("every one of you whining is a clown", "you people are pathetic", "go cheer for Utah then") -> "timeout", category "member_attack". Disagreeing with the chat's take is still allow.
+"remove" stays "remove". Never use timeout for specific criticism, the refs or the opponent.
+
+EXAMPLES (heat mode)
+- "@member you clearly have never watched football." -> timeout (heated, edging personal; "review" outside heat mode)
+- "We are so soft, this is pathetic" -> timeout (team_shaming)
+- "Our o-line has been getting pushed back all half" -> allow
+- "Refs are blind tonight" -> allow
+- "This one's over, we're losing by 14" -> allow
+- "All of you whining in here are clowns, go cheer for Utah" -> timeout (member_attack)
+- "Y'all are overreacting, we're still up 3" -> allow
+
+For "timeout", dm_text is 1-2 calm sentences: the channel is running hot, so this is a quick one-minute cooldown, and criticism of the game is always welcome. No lecturing, never mention AI or automation.
+verdict may be "allow", "timeout", "review" or "remove"."""
+
 OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -232,12 +260,15 @@ NEGATIVE_TONES = ("frustrated", "hostile")
 
 MOOD_REMINDERS = [
     "Rough stretch. Quick reminder: criticism of the team is always welcome in here. Keep it about the play, "
-    "not the people, and give each other some grace. Slowmode is on for a bit so everyone gets heard. 💙",
+    "not the people, and give each other some grace. 💙",
     "Tough one to watch. Vent away about the play-calling and the results, that's what this place is for. "
-    "Just keep it off the players and each other. Slowing the channel down for a few minutes. 💙",
+    "Just keep it off the players and each other. 💙",
     "Big emotions right now, totally fair. Reminder that the guys on the field are college kids, and the "
-    "folks in here are your fellow Cougs. Criticize the game, not the people. Slowmode on for a bit. 💙",
+    "folks in here are your fellow Cougs. Criticize the game, not the people. 💙",
 ]
+# Appended to the reminder when heat mode turns on / slowmode is applied (only claims what actually happened).
+MOOD_HEAT_LINE = "🌡️ Things are running hot, so the mod bot is a little quicker with one-minute cooldowns in here for the next {mins} minutes."
+MOOD_SLOWMODE_LINE = "Slowmode is on for a few minutes so everyone gets heard."
 
 
 class MoodTracker:
@@ -386,9 +417,11 @@ def build_user_content(message_text: str, author: str, channel: str, context: li
 
 async def classify(message_text: str, author: str, channel: str,
                    context: list[tuple[str, str]] | None = None,
-                   reply_to: tuple[str, str] | None = None, gameday: bool = False) -> dict | None:
+                   reply_to: tuple[str, str] | None = None, gameday: bool = False, heat: bool = False) -> dict | None:
     """Return {verdict, category, reason, dm_text} or None (fail open).
-    gameday=True applies the stricter game-day rules and allows the "timeout" verdict."""
+    gameday=True applies the stricter game-day rules and allows the "timeout" verdict.
+    heat=True (channel in heat mode) adds HEAT_ADDENDUM and also allows "timeout"."""
+    timeouts_ok = gameday or heat
     await _maybe_refresh_roster()
     system = [{"type": "text", "text": SYSTEM_PROMPT}]
     roster = roster_text()
@@ -397,6 +430,8 @@ async def classify(message_text: str, author: str, channel: str,
     system[-1]["cache_control"] = {"type": "ephemeral"}
     if gameday:
         system.append({"type": "text", "text": GAMEDAY_ADDENDUM, "cache_control": {"type": "ephemeral"}})
+    if heat:
+        system.append({"type": "text", "text": HEAT_ADDENDUM, "cache_control": {"type": "ephemeral"}})
     try:
         resp = await _get_client().messages.create(
             model=MODEL,
@@ -404,7 +439,7 @@ async def classify(message_text: str, author: str, channel: str,
             system=system,
             messages=[{"role": "user", "content": build_user_content(message_text, author, channel, context or [], reply_to)}],
             output_config={"effort": "low", "format": {"type": "json_schema",
-                                                       "schema": GAMEDAY_OUTPUT_SCHEMA if gameday else OUTPUT_SCHEMA}},
+                                                       "schema": GAMEDAY_OUTPUT_SCHEMA if timeouts_ok else OUTPUT_SCHEMA}},
         )
     except anthropic.APIConnectionError as e:
         log.warning(f"automod: connection/timeout, allowing message: {e}")
@@ -439,7 +474,7 @@ async def classify(message_text: str, author: str, channel: str,
     except (json.JSONDecodeError, TypeError):
         log.warning(f"automod: unparseable output, allowing message: {text[:200]!r}")
         return None
-    if result.get("verdict") not in (GAMEDAY_VERDICTS if gameday else VERDICTS):
+    if result.get("verdict") not in (GAMEDAY_VERDICTS if timeouts_ok else VERDICTS):
         log.warning(f"automod: bad verdict {result.get('verdict')!r}, allowing message")
         return None
     u = resp.usage

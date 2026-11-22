@@ -2904,10 +2904,13 @@ async def _automod_check(message: discord.Message, edited_from: str | None = Non
         except (discord.Forbidden, discord.HTTPException):
             context = []
         reply_to = await _automod_reply_target(message)
+        hot = _is_hot(message.channel)
         result = await automod.classify(
             message.content, message.author.display_name, getattr(message.channel, "name", "?"), context, reply_to,
-            gameday=_is_gameday_channel(message.channel),
+            gameday=_is_gameday_channel(message.channel), heat=hot,
         )
+        if result is not None:
+            result["_heat"] = hot
     # Edits don't feed the mood monitor: the message was already counted once.
     if result and automod.MOOD_ENABLED and edited_from is None:
         target = message.channel if isinstance(message.channel, discord.TextChannel) else getattr(message.channel, "parent", None)
@@ -2922,6 +2925,23 @@ async def _automod_check(message: discord.Message, edited_from: str | None = Non
 
 _mood_tracker = automod.MoodTracker()
 
+# Heat mode: channel id -> unix time the heat ends. Set when the mood monitor trips LIVE (Eric, Nov 21 2026).
+_heat_until: dict[int, float] = {}
+
+
+def _heat_key(channel) -> int | None:
+    """Threads share their parent channel's heat."""
+    if isinstance(channel, discord.Thread):
+        return channel.parent_id
+    return getattr(channel, "id", None)
+
+
+def _is_hot(channel) -> bool:
+    if not automod.HEAT_ENABLED:
+        return False
+    k = _heat_key(channel)
+    return k is not None and _heat_until.get(k, 0) > dt.now(timezone.utc).timestamp()
+
 
 async def _mood_act(channel: discord.TextChannel, hit: dict):
     live = automod.MOOD_MODE == "live"
@@ -2929,14 +2949,23 @@ async def _mood_act(channel: discord.TextChannel, hit: dict):
     stats = (f"{hit['pct']}% of the last {hit['messages']} messages in {int(automod.MOOD_WINDOW_MIN)} min were frustrated "
              f"or hostile ({hit['hostile']} hostile).")
     reminder = secrets.choice(automod.MOOD_REMINDERS)
+    heat_on = live and automod.HEAT_ENABLED
+    slow = live and automod.MOOD_SLOWMODE_S and channel.slowmode_delay < automod.MOOD_SLOWMODE_S
+    if heat_on:
+        _heat_until[channel.id] = dt.now(timezone.utc).timestamp() + automod.HEAT_MIN * 60
+        reminder += "\n\n" + automod.MOOD_HEAT_LINE.format(mins=int(automod.HEAT_MIN))
+    if slow:
+        reminder += ("\n" if heat_on else "\n\n") + automod.MOOD_SLOWMODE_LINE
     did = []
+    if heat_on:
+        did.append(f"🌡️ heat mode ON for {int(automod.HEAT_MIN)} min (1-min cooldowns instead of review flags)")
     if live:
         try:
             await channel.send(reminder, silent=True, allowed_mentions=discord.AllowedMentions.none())
             did.append("posted reminder")
         except (discord.Forbidden, discord.HTTPException) as e:
             did.append(f"⚠️ couldn't post reminder ({e})")
-        if automod.MOOD_SLOWMODE_S and channel.slowmode_delay < automod.MOOD_SLOWMODE_S:
+        if slow:
             try:
                 prev = channel.slowmode_delay
                 await channel.edit(slowmode_delay=automod.MOOD_SLOWMODE_S, reason="Mood monitor: channel heating up")
@@ -2956,7 +2985,8 @@ async def _mood_act(channel: discord.TextChannel, hit: dict):
     )
     embed.add_field(name="Channel", value=channel.mention, inline=True)
     embed.add_field(name="Action", value=", ".join(did) if live else
-                    f"Would post a reminder + {automod.MOOD_SLOWMODE_S}s slowmode for {int(automod.MOOD_SLOWMODE_MIN)} min", inline=True)
+                    "Would post a reminder" + (f" + {automod.MOOD_SLOWMODE_S}s slowmode for {int(automod.MOOD_SLOWMODE_MIN)} min" if automod.MOOD_SLOWMODE_S else "")
+                    + (f" + turn on heat mode for {int(automod.HEAT_MIN)} min" if automod.HEAT_ENABLED else ""), inline=True)
     embed.add_field(name="Reminder text", value=reminder[:1024], inline=False)
     embed.set_footer(text=f"Won't fire again in this channel for {int(automod.MOOD_COOLDOWN_MIN)} min")
     log_channel = bot.get_channel(FLAG_LOG_CHANNEL_ID)
@@ -3012,9 +3042,16 @@ async def _gameday_strike(member, flag_id: int, reason: str, min_step: int = 0) 
 async def _automod_lift_strike(interaction: discord.Interaction, flag_id: int, row: dict) -> str:
     """Void the strike for this flag and end the member's timeout if it's still running."""
     strike = db.void_strike(flag_id)
-    if not strike:
-        return "no automatic timeout on this one"
     member = interaction.guild.get_member(int(row["author_id"])) if interaction.guild else None
+    if not strike:
+        # Heat-mode cooldowns have no strike; still end the timeout if it's running.
+        if member and member.is_timed_out() and row.get("status") == "timeout":
+            try:
+                await member.timeout(None, reason=f"AutoMod #{flag_id}: lifted by {interaction.user}")
+            except discord.HTTPException as e:
+                return f"lifting the timeout failed: {e}"
+            return "timeout lifted (no strike on this one)"
+        return "no automatic timeout on this one"
     if member and member.is_timed_out():
         try:
             await member.timeout(None, reason=f"AutoMod #{flag_id}: lifted by {interaction.user}")
@@ -3047,8 +3084,12 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
     attachments = ", ".join(a.url for a in message.attachments)
     content = message.content + (f"\n[attachments: {attachments}]" if attachments else "")
     gameday_live = auto_remove and _is_gameday_channel(channel)
-    if verdict == "timeout" and not gameday_live:
-        verdict = "review"   # timeouts are only automatic in live game-day chat
+    # Heat mode: a "timeout" outside live game-day chat is a flat HEAT_TIMEOUT_MIN cooldown, no strike (Eric, Nov 21 2026).
+    heat_timeout = bool(result.get("_heat")) and verdict == "timeout" and not gameday_live
+    if heat_timeout:
+        live = True
+    if verdict == "timeout" and not gameday_live and not heat_timeout:
+        verdict = "review"   # timeouts are only automatic in live game-day chat (or a hot channel)
     status = ("removed" if verdict == "remove" and auto_remove else
               "timeout" if verdict == "timeout" else "open") if live else "shadow"
     flag_id = db.log_flagged_message(
@@ -3059,7 +3100,9 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
         reason=result.get("reason"), category=result.get("category"),
     )
 
-    if verdict == "timeout":
+    if heat_timeout:
+        title, color = "🌡️ Heat-mode cooldown: message still up, author sits out a minute", discord.Color.gold()
+    elif verdict == "timeout":
         title, color = "🤖 AutoMod Timeout: message still up, author on cooldown", discord.Color.gold()
     elif verdict == "remove" and auto_remove:
         title, color = "🤖 AutoMod Removed", discord.Color.red()
@@ -3106,6 +3149,17 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
                 embed.add_field(name="DM", value="No timeout DM (1 min).", inline=False)
         else:
             note = f"⚠️ Auto timeout not applied: {problem}."
+    elif heat_timeout and edited_from is None:
+        mins = automod.HEAT_TIMEOUT_MIN
+        try:
+            await message.author.timeout(datetime.timedelta(minutes=mins), reason=f"AutoMod #{flag_id} (heat mode cooldown, no strike)"[:500])
+            db.log_automod_action(flag_id, "heat_timeout", str(bot.user.id), "AutoMod (heat mode)", f"{mins} min, no strike")
+            embed.add_field(name="🌡️ Heat-mode cooldown", value=f"**{_mins_label(mins)}**, no strike (channel is in heat mode). "
+                            "**Lift timeout** ends it early.", inline=False)
+            if mins > 1:
+                timeout_line = f"\n\n⏱️ You're on a **{_mins_label(mins)} cooldown** while the channel cools off."
+        except (discord.Forbidden, discord.HTTPException, AttributeError) as e:
+            note = f"⚠️ Heat-mode cooldown not applied: {e}."
     if verdict == "timeout":
         dm_text = (result.get("dm_text") or "").strip() or (
             f"Hey, quick cooldown in **#{getattr(channel, 'name', '?')}**. Game-day chat is for reacting to the game; "
