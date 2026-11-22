@@ -83,7 +83,7 @@ WHO IS PROTECTED: ONLY BYU's own people, meaning the current BYU football and me
 
 HOW TO TELL WHO IS BYU: match full names, last names and nicknames against <byu_people>; "our QB", "our corner", "we" and "us" mean BYU. A person who is not on the list and is not clearly described as a BYU player or coach is NOT BYU: never assume a stranger is one of ours. Watch for shared surnames: Kevin Young is BYU's basketball coach, but RJ Young is a Fox Sports analyst. When the conversation is clearly about another school's player (e.g. Sam Leavitt at LSU), he is an opposing player.
 
-THE FLOOR, FOR EVERYONE (protected or not): threats, wishing or inciting injury or harm ("put a bounty on him"), slurs or hate about race, religion, ethnicity, sex or orientation, sexual content about a real person, and accusations of sexual violence or other serious crimes. These are never allowed, whoever the target is.
+THE FLOOR, FOR EVERYONE (protected or not): threats, wishing or inciting injury or harm ("put a bounty on him"), telling people to hurt or kill themselves even as a figure of speech ("go jump off a bridge", "kys"), including a whole fanbase, slurs or hate about race, religion, ethnicity, sex or orientation, sexual content about a real person, and accusations of sexual violence or other serious crimes. These are never allowed, whoever the target is.
 
 ALLOW (the vast majority of messages):
 - Criticism of play-calling, schemes, coaching decisions, roster/recruiting choices, effort, or results — even blunt, frustrated, or sarcastic. "That was the worst half I've seen in years" is allowed.
@@ -133,6 +133,8 @@ EXAMPLES
 - "Well if Jay gets fired we could keep him on as a consultant" -> allow (hypothetical joke)
 - "Do we have any solid info on how LJ's ankle is doing?" -> allow (injury question)
 - "Someone put a bounty on that player who stepped on his ankle" -> remove (incites harm; the floor covers opposing players too)
+- "Utah fans should all go jump off a bridge" -> remove (telling a group to harm themselves; the floor covers rival fans too)
+- "Utah fans are the most insufferable fanbase in the country" -> allow (rival trash talk)
 - "LSU hates Leavitt now. Seen partying two hours after the loss, a jerk to the reporters, and now he wants $7 million? Diabolical" -> allow (opposing player's conduct; he is not BYU)
 - "The thing that stands out about RJ Young is he doesn't seem very bright" -> allow (a Fox Sports analyst, not BYU)
 - "Their QB is a total bum, our D is going to eat him alive" -> allow (opposing player)
@@ -201,9 +203,9 @@ HEAT_ENABLED = os.getenv("HEAT_ENABLED", "0").strip().lower() in ("1", "true", "
 HEAT_MIN = float(os.getenv("HEAT_MIN", "30"))
 HEAT_TIMEOUT_MIN = int(os.getenv("HEAT_TIMEOUT_MIN", "1"))
 
-HEAT_ADDENDUM = """HEAT MODE. This channel has been running hot: most of the recent messages were frustrated or hostile, and for the next few minutes the goal is to cool it down. Every rule above still applies, and ordinary frustration is still ALLOW: specific criticism of plays, calls, drives or units, predicting a loss, ripping the refs, trashing the opponent and its coaches, rival trash talk. Heat mode is NOT a ban on venting.
+HEAT_ADDENDUM = """HEAT MODE IS ON for this channel right now. The bot's temperature monitor measured it over the last 30 minutes (most messages frustrated or hostile); that is a fact, so do not second-guess it from the few context messages you can see. For the next few minutes the goal is to cool it down. Every rule above still applies, and ordinary frustration is still ALLOW: specific criticism of plays, calls, drives or units, predicting a loss, ripping the refs, trashing the opponent and its coaches, rival trash talk. Heat mode is NOT a ban on venting.
 
-While the channel is hot, be quicker to give a short cooldown (verdict "timeout": the message STAYS UP and the author sits out a minute). This OVERRIDES the "review" examples in the rules above: while heat mode is on, any of them that is heated, edging personal or aimed at members becomes "timeout".
+While the channel is hot, be quicker to give a short cooldown (verdict "timeout": the message STAYS UP and the author sits out a minute). This OVERRIDES the "review" examples in the rules above, in game-day chat as well as the main channels: while heat mode is on, any of them that is heated, edging personal or aimed at members becomes "timeout". In heat mode, "review" is only for things you genuinely can't read (ambiguous fragments, possible private-life rumors), never for heat.
 - Anything you would otherwise mark "review" because it's heated, edging personal, piling on, or baiting other members -> "timeout" (keep the category you'd have used).
 - Team shaming of BYU as a group rather than criticism of what's happening ("this is embarrassing", "pathetic", "we suck", "joke of a team", "so soft") -> "timeout", category "team_shaming".
 - Insulting name-calling of a BYU coach or staff member beyond a mild jab -> "timeout", category "coach_insult".
@@ -248,6 +250,9 @@ GAMEDAY_OUTPUT_SCHEMA["properties"]["category"]["enum"] += ["team_shaming", "coa
 # individually-fine frustrated messages, so this watches the channel as a whole
 # and, when it boils over, the bot posts a norms reminder + brief slowmode.
 MOOD_ENABLED = _flag("MOOD_ENABLED")
+# Channels AutoMod checks but the temperature check (mood monitor + heat mode) ignores, e.g. #rivalry and
+# #college-football, where trash talk about other teams is the point and scores as "hostile" (Nov 22 2026).
+MOOD_EXCLUDE_CHANNEL_IDS = {int(x) for x in os.getenv("MOOD_EXCLUDE_CHANNEL_IDS", "").replace(" ", "").split(",") if x.isdigit()}
 MOOD_MODE = os.getenv("MOOD_MODE", "log").strip().lower()   # log = shadow, live = act
 MOOD_WINDOW_MIN = float(os.getenv("MOOD_WINDOW_MIN", "30"))
 MOOD_MIN_MSGS = int(os.getenv("MOOD_MIN_MSGS", "12"))

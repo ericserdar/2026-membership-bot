@@ -2924,7 +2924,7 @@ async def _automod_check(message: discord.Message, edited_from: str | None = Non
     # Edits don't feed the mood monitor: the message was already counted once.
     if result and automod.MOOD_ENABLED and edited_from is None:
         target = message.channel if isinstance(message.channel, discord.TextChannel) else getattr(message.channel, "parent", None)
-        if isinstance(target, discord.TextChannel):
+        if isinstance(target, discord.TextChannel) and target.id not in automod.MOOD_EXCLUDE_CHANNEL_IDS:
             hit = _mood_tracker.record(target.id, message.created_at.timestamp(), result.get("tone"))
             if hit:
                 asyncio.create_task(_mood_act(target, hit))
@@ -2950,7 +2950,7 @@ def _is_hot(channel) -> bool:
     if not automod.HEAT_ENABLED:
         return False
     k = _heat_key(channel)
-    return k is not None and _heat_until.get(k, 0) > dt.now(timezone.utc).timestamp()
+    return k is not None and k not in automod.MOOD_EXCLUDE_CHANNEL_IDS and _heat_until.get(k, 0) > dt.now(timezone.utc).timestamp()
 
 
 async def _mood_act(channel: discord.TextChannel, hit: dict):
