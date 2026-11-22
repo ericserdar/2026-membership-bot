@@ -1238,8 +1238,18 @@ GAMEDAY_AUTOMOD_MODE = os.getenv("GAMEDAY_AUTOMOD_MODE", "live").strip().lower()
 GAMEDAY_CHANNEL_IDS: set[int] = set()   # open game-day channels (kept with automod.CHANNEL_IDS)
 # Automatic timeouts in game-day channels climb this ladder (minutes), one step
 # per strike in the last GAMEDAY_STRIKE_WINDOW_DAYS; the last step repeats.
-GAMEDAY_TIMEOUT_LADDER = [int(x) for x in os.getenv("GAMEDAY_TIMEOUT_LADDER", "1,5,5,10,10,10,30,60").split(",") if x.strip().isdigit()] or [1]
+GAMEDAY_TIMEOUT_LADDER = [int(x) for x in os.getenv("GAMEDAY_TIMEOUT_LADDER", "1,5,5,15,15,15,30,60").split(",") if x.strip().isdigit()] or [1]
 GAMEDAY_STRIKE_WINDOW_DAYS = float(os.getenv("GAMEDAY_STRIKE_WINDOW_DAYS", "30"))
+# Vent server (Eric, Nov 21 2026): repeat offenders get pointed at an UNMODERATED server to let off steam.
+# DM with their 2nd 5-min timeout; public @mention in the same channel on any timeout >= VENT_PUBLIC_MIN.
+# Empty VENT_SERVER_INVITE = off (the card notes what it would have done).
+VENT_SERVER_INVITE = os.getenv("VENT_SERVER_INVITE", "").strip()
+VENT_DM_AFTER_5MIN = int(os.getenv("VENT_DM_AFTER_5MIN", "2"))
+VENT_PUBLIC_MIN = int(os.getenv("VENT_PUBLIC_MIN", "15"))
+VENT_DM = ("Hey, that's your second 5-minute timeout. If you need to let off some steam, there's a separate CougConnect "
+           "server with no moderation where you can vent all you want: {link}\n\nCome back here whenever you're ready. 💙")
+VENT_PUBLIC = ("{mention}, sounds like you need to let off some steam. Head over to {link} (no mods over there) "
+               "and come back when you're ready. 💙")
 # A removed post is a strike too (delete + timeout). 0 = removals only delete.
 GAMEDAY_TIMEOUT_ON_REMOVE = os.getenv("GAMEDAY_TIMEOUT_ON_REMOVE", "1").strip().lower() in ("1", "true", "yes", "on")
 
@@ -3039,6 +3049,26 @@ async def _gameday_strike(member, flag_id: int, reason: str, min_step: int = 0) 
     return minutes, prior + 1, None
 
 
+async def _vent_nudge(message: discord.Message, minutes: int) -> str | None:
+    """After a ladder timeout: DM on the Nth 5-min timeout, public @mention on long ones. Returns a card note."""
+    author = message.author
+    if minutes == 5 and db.count_strikes_of(str(author.id), GAMEDAY_STRIKE_WINDOW_DAYS, 5) == VENT_DM_AFTER_5MIN:
+        if not VENT_SERVER_INVITE:
+            return f"Would DM the vent-server invite (2nd 5-min timeout), but VENT_SERVER_INVITE isn't set."
+        sent = await _dm_member(author.id, VENT_DM.format(link=VENT_SERVER_INVITE), what="AutoMod vent-server DM", ignore_dry_run=True)
+        return "DM'd the vent-server invite (2nd 5-min timeout)." if sent else "⚠️ Couldn't DM the vent-server invite (DMs closed?)."
+    if minutes >= VENT_PUBLIC_MIN:
+        if not VENT_SERVER_INVITE:
+            return f"Would post the vent-server invite publicly ({_mins_label(minutes)} timeout), but VENT_SERVER_INVITE isn't set."
+        try:
+            await message.channel.send(VENT_PUBLIC.format(mention=author.mention, link=VENT_SERVER_INVITE), silent=True,
+                                       allowed_mentions=discord.AllowedMentions(users=[author], everyone=False, roles=False))
+            return f"Posted the vent-server invite in {message.channel.mention} ({_mins_label(minutes)} timeout)."
+        except (discord.Forbidden, discord.HTTPException) as e:
+            return f"⚠️ Couldn't post the vent-server invite: {e}"
+    return None
+
+
 async def _automod_lift_strike(interaction: discord.Interaction, flag_id: int, row: dict) -> str:
     """Void the strike for this flag and end the member's timeout if it's still running."""
     strike = db.void_strike(flag_id)
@@ -3140,6 +3170,9 @@ async def _automod_act(message: discord.Message, result: dict, edited_from: str 
         if minutes:
             embed.add_field(name="⏱️ Auto timeout", value=f"**{_mins_label(minutes)}** (strike {strike_no} in "
                             f"{GAMEDAY_STRIKE_WINDOW_DAYS:g} days). **Lift timeout** voids the strike.", inline=False)
+            vent = await _vent_nudge(message, minutes)
+            if vent:
+                embed.add_field(name="🌋 Vent server", value=vent[:1024], inline=False)
             # A 1-minute timeout is over before the DM is read, so it gets no DM
             # (Eric, Nov 6). A removal still DMs about the removal, minus this line.
             if minutes > 1:

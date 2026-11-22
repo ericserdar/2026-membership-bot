@@ -1368,6 +1368,16 @@ def count_strikes(user_id: str, days: float) -> int:
             (user_id, since)).fetchone()[0]
 
 
+def count_strikes_of(user_id: str, days: float, minutes: int) -> int:
+    """Active (non-voided) strikes of exactly this length in the window."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_automod_strikes(conn)
+        return conn.execute(
+            "SELECT COUNT(*) FROM automod_strikes WHERE user_id = ? AND at >= ? AND voided_at IS NULL AND minutes = ?",
+            (user_id, since, minutes)).fetchone()[0]
+
+
 def add_strike(user_id: str, flag_id: int, minutes: int):
     with sqlite3.connect(DB_PATH) as conn:
         _init_automod_strikes(conn)
