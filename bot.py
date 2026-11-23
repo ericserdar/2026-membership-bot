@@ -58,6 +58,10 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 # Sponsor spotlight days (weekday -> slot within the week): Monday, Thursday.
 SPONSOR_SPOTLIGHT_DAYS = {0: 0, 3: 1}
+# Date overrides for the spotlight rotation ("YYYY-MM-DD": sponsor name), e.g. to move a sponsor up for a
+# promotion and swap the displaced one into its slot (Eric, Nov 22 2026: EverScent -> Thanksgiving).
+SPONSOR_OVERRIDES_PATH = os.path.join(os.path.dirname(__file__), "spotlight_overrides.json")
+SPONSOR_PIN_HOURS = float(os.getenv("SPONSOR_PIN_HOURS", "24"))   # 0 = don't pin
 VERIFY_CHANNEL_ID = int(os.getenv("DISCORD_VERIFY_CHANNEL_ID", "0"))
 UNSUBSCRIBED_CHANNEL_ID = int(os.getenv("DISCORD_UNSUBSCRIBED_CHANNEL_ID", "1360788474374000700"))
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("DISCORD_ADMIN_LOG_CHANNEL_ID", "1493610618094227577"))
@@ -297,6 +301,7 @@ class CougConnectBot(commands.Bot):
         self.milestone_task.start()
         self.upgrade_nudge_task.start()
         self.sponsor_spotlight_task.start()
+        self.sponsor_unpin_task.start()
         self.f101_weekly_task.start()
         self.weekly_digest_task.start()
         self.news_task.start()
@@ -840,16 +845,41 @@ class CougConnectBot(commands.Bot):
         channel = self.get_channel(GENERAL_CHANNEL_ID)
         if not sponsors or not channel:
             return
-        sponsor = sponsors[(today.isocalendar().week * 2 + slot_of_day) % len(sponsors)]
-        content, embed, view = _sponsor_spotlight_message(sponsor)
+        sponsor = _spotlight_sponsor_for(today.date(), sponsors)
+        content, embed, view = _sponsor_spotlight_message(sponsor, today.date())
         try:
-            await channel.send(content=content, embed=embed, view=view)
+            msg = await channel.send(content=content, embed=embed, view=view)
             log.info(f"Sponsor spotlight posted: {sponsor['name']}")
         except Exception as e:
             log.error(f"Sponsor spotlight failed: {e}")
+            return
+        if SPONSOR_PIN_HOURS > 0:
+            await _pin_spotlight(msg, sponsor["name"])
 
     @sponsor_spotlight_task.before_loop
     async def before_sponsor_spotlight(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=15)
+    async def sponsor_unpin_task(self):
+        """Unpin sponsor spotlights once their SPONSOR_PIN_HOURS are up (restart-safe: due times live in the DB)."""
+        for row in db.due_sponsor_pins(dt.now(timezone.utc).replace(tzinfo=None)):
+            channel = self.get_channel(int(row["channel_id"]))
+            try:
+                if channel:
+                    msg = await channel.fetch_message(int(row["message_id"]))
+                    if msg.pinned:
+                        await msg.unpin(reason="Sponsor spotlight: pin time is up")
+                        log.info(f"spotlight unpinned: {row['sponsor']}")
+            except discord.NotFound:
+                pass   # message deleted by hand: nothing to unpin
+            except (discord.Forbidden, discord.HTTPException) as e:
+                log.error(f"spotlight unpin failed for {row['message_id']}: {e}")
+                continue   # retry next pass
+            db.finish_sponsor_pin(row["message_id"])
+
+    @sponsor_unpin_task.before_loop
+    async def before_sponsor_unpin(self):
         await self.wait_until_ready()
 
     @tasks.loop(minutes=30)
@@ -2699,17 +2729,53 @@ async def _automod_delete(row: dict) -> str:
 
 
 
-def _sponsor_spotlight_message(sponsor: dict) -> tuple[str | None, discord.Embed, discord.ui.View | None]:
+def _spotlight_sponsor_for(day: datetime.date, sponsors: list[dict]) -> dict:
+    """Rotation by ISO week (2 slots/week), unless spotlight_overrides.json names a sponsor for this date."""
+    name = (_load_json(SPONSOR_OVERRIDES_PATH) or {}).get(day.isoformat())
+    if name:
+        hit = next((s for s in sponsors if s.get("name") == name), None)
+        if hit:
+            return hit
+        log.warning(f"spotlight override {day}: no sponsor named {name!r}; using the normal rotation")
+    slot = SPONSOR_SPOTLIGHT_DAYS.get(day.weekday(), 0)
+    return sponsors[(day.isocalendar().week * 2 + slot) % len(sponsors)]
+
+
+async def _pin_spotlight(msg: discord.Message, sponsor_name: str):
+    """Pin for SPONSOR_PIN_HOURS, drop Discord's 'pinned a message' notice, and record the unpin time."""
+    try:
+        await msg.pin(reason=f"Sponsor spotlight ({sponsor_name}), {SPONSOR_PIN_HOURS:g}h")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        log.error(f"spotlight pin failed: {e}")
+        return
+    db.add_sponsor_pin(str(msg.id), str(msg.channel.id), sponsor_name,
+                       dt.now(timezone.utc).replace(tzinfo=None) + datetime.timedelta(hours=SPONSOR_PIN_HOURS))
+    try:   # the system "pinned a message" line is noise in #general
+        async for m in msg.channel.history(limit=10, after=msg):
+            if m.type == discord.MessageType.pins_add and m.reference and m.reference.message_id == msg.id:
+                await m.delete()
+                break
+    except (discord.Forbidden, discord.HTTPException) as e:
+        log.warning(f"spotlight: couldn't remove the pin notice: {e}")
+
+
+def _sponsor_spotlight_message(sponsor: dict, today: datetime.date | None = None) -> tuple[str | None, discord.Embed, discord.ui.View | None]:
     """Build the Sponsor Spotlight: the OFFER leads (Eric, Nov 22 2026: 'we want people to click the link
     and buy stuff'), then the code, the sponsor's offer card image, and a Shop button straight to the link.
     Sponsors with no offer (Western Hearth asked for name only) keep the plain blurb."""
     url = (sponsor.get("url") or "").strip() or None
     offer = (sponsor.get("offer") or "").strip()
+    # An offer with a deadline shows "⏳ <deadline_label>" and disappears (code, card, button too) once it passes.
+    deadline = sponsor.get("deadline")
+    if offer and deadline and (today or dt.now(timezone.utc).date()).isoformat() > deadline:
+        offer = ""
     parts = []
     if offer:
         parts.append(f"**🎁 {offer}**")
         if sponsor.get("offer_detail"):
             parts.append(sponsor["offer_detail"])
+        if deadline and sponsor.get("deadline_label"):
+            parts.append(f"⏳ **{sponsor['deadline_label']}**")
         parts.append("")
     parts.append(sponsor.get("blurb", ""))
     if url:
@@ -2721,9 +2787,9 @@ def _sponsor_spotlight_message(sponsor: dict) -> tuple[str | None, discord.Embed
         url=url,  # embed title links to the sponsor too
         color=discord.Color.from_rgb(26, 62, 240),
     )
-    if sponsor.get("code"):
+    if offer and sponsor.get("code"):
         embed.add_field(name="Promo code", value=f"`{sponsor['code']}`", inline=True)
-    if sponsor.get("image"):
+    if offer and sponsor.get("image"):
         embed.set_image(url=sponsor["image"])
     embed.set_footer(text="CougConnect sponsors keep this community running. Show them some love!")
     view = None

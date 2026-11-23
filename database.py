@@ -1439,3 +1439,40 @@ def f101_weekly_record(iso_week: str, queue_week: int, concept_id: str, message_
             "INSERT OR REPLACE INTO f101_weekly (iso_week, queue_week, concept_id, message_id, posted_at) VALUES (?, ?, ?, ?, ?)",
             (iso_week, queue_week, concept_id, message_id, datetime.now(timezone.utc).isoformat()),
         )
+
+
+# ── Sponsor spotlight pins (pinned 24h, unpinned by sponsor_unpin_task) ──────
+
+def _init_sponsor_pins(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sponsor_pins (
+            message_id TEXT PRIMARY KEY,
+            channel_id TEXT,
+            sponsor    TEXT,
+            unpin_at   TEXT,      -- ISO UTC
+            done_at    TEXT
+        )
+    """)
+
+
+def add_sponsor_pin(message_id: str, channel_id: str, sponsor: str, unpin_at: datetime):
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_sponsor_pins(conn)
+        conn.execute("INSERT OR REPLACE INTO sponsor_pins (message_id, channel_id, sponsor, unpin_at) VALUES (?, ?, ?, ?)",
+                     (message_id, channel_id, sponsor, unpin_at.isoformat()))
+        conn.commit()
+
+
+def due_sponsor_pins(now: datetime) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_sponsor_pins(conn)
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM sponsor_pins WHERE done_at IS NULL AND unpin_at <= ?", (now.isoformat(),)).fetchall()]
+
+
+def finish_sponsor_pin(message_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        _init_sponsor_pins(conn)
+        conn.execute("UPDATE sponsor_pins SET done_at = ? WHERE message_id = ?", (datetime.utcnow().isoformat(), message_id))
+        conn.commit()

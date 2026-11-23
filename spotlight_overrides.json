@@ -1,0 +1,5 @@
+{
+  "_note": "Date -> sponsor name. Overrides the Mon/Thu rotation for that date (Nov 22 2026: EverScent moved up to Thanksgiving, UTP takes its Dec 7 slot).",
+  "2026-11-26": "EverScent",
+  "2026-12-07": "Utah Travel Pros"
+}
