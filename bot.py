@@ -841,29 +841,9 @@ class CougConnectBot(commands.Bot):
         if not sponsors or not channel:
             return
         sponsor = sponsors[(today.isocalendar().week * 2 + slot_of_day) % len(sponsors)]
-        url = (sponsor.get("url") or "").strip() or None
-        description = sponsor.get("blurb", "")
-        if url:
-            # Visible link line so members know the spotlight is clickable
-            display = re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
-            description = f"{description}\n\n🔗 [{display}]({url})"
-        embed = discord.Embed(
-            title=f"🤝 Sponsor Spotlight: {sponsor['name']}",
-            description=description,
-            url=url,  # makes the embed title a clickable link to the sponsor's site
-            color=discord.Color.blue(),
-        )
-        embed.set_footer(text="CougConnect sponsors keep this community running — show them some love!")
-        # Tag the sponsor in the message content (embed mentions don't ping)
-        content = None
-        if sponsor.get("discord_id"):
-            content = f"Say thanks to <@{sponsor['discord_id']}>! 👏"
-        elif sponsor.get("email"):
-            record = db.get_member_by_email(sponsor["email"])
-            if record:
-                content = f"Say thanks to <@{record['discord_id']}>! 👏"
+        content, embed, view = _sponsor_spotlight_message(sponsor)
         try:
-            await channel.send(content=content, embed=embed)
+            await channel.send(content=content, embed=embed, view=view)
             log.info(f"Sponsor spotlight posted: {sponsor['name']}")
         except Exception as e:
             log.error(f"Sponsor spotlight failed: {e}")
@@ -2717,6 +2697,49 @@ async def _automod_delete(row: dict) -> str:
     except discord.Forbidden:
         return "missing Manage Messages permission"
 
+
+
+def _sponsor_spotlight_message(sponsor: dict) -> tuple[str | None, discord.Embed, discord.ui.View | None]:
+    """Build the Sponsor Spotlight: the OFFER leads (Eric, Nov 22 2026: 'we want people to click the link
+    and buy stuff'), then the code, the sponsor's offer card image, and a Shop button straight to the link.
+    Sponsors with no offer (Western Hearth asked for name only) keep the plain blurb."""
+    url = (sponsor.get("url") or "").strip() or None
+    offer = (sponsor.get("offer") or "").strip()
+    parts = []
+    if offer:
+        parts.append(f"**🎁 {offer}**")
+        if sponsor.get("offer_detail"):
+            parts.append(sponsor["offer_detail"])
+        parts.append("")
+    parts.append(sponsor.get("blurb", ""))
+    if url:
+        display = re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
+        parts.append(f"\n🔗 [{display}]({url})")
+    embed = discord.Embed(
+        title=f"🤝 Sponsor Spotlight: {sponsor['name']}",
+        description="\n".join(parts).strip(),
+        url=url,  # embed title links to the sponsor too
+        color=discord.Color.from_rgb(26, 62, 240),
+    )
+    if sponsor.get("code"):
+        embed.add_field(name="Promo code", value=f"`{sponsor['code']}`", inline=True)
+    if sponsor.get("image"):
+        embed.set_image(url=sponsor["image"])
+    embed.set_footer(text="CougConnect sponsors keep this community running. Show them some love!")
+    view = None
+    if url and offer:
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label=sponsor.get("cta") or f"Shop {sponsor['name']}",
+                                        url=url, emoji="🛒"))
+    # Tag the sponsor in the message content (embed mentions don't ping)
+    content = None
+    if sponsor.get("discord_id"):
+        content = f"Say thanks to <@{sponsor['discord_id']}>! 👏"
+    elif sponsor.get("email"):
+        record = db.get_member_by_email(sponsor["email"])
+        if record:
+            content = f"Say thanks to <@{record['discord_id']}>! 👏"
+    return content, embed, view
 
 async def _automod_dm(author_id: int, text: str, content: str):
     quoted = "\n".join("> " + line for line in content[:400].splitlines() or [""])

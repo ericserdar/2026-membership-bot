@@ -1,24 +1,37 @@
 [
   {
     "name": "Madsen Realty Group",
-    "blurb": "Buying or selling along the Wasatch Front? The Madsen Realty Group has Cougar Nation covered.",
+    "blurb": "Buying or selling along the Wasatch Front? The Madsen Realty Group has Cougar Nation covered, residential and commercial.",
     "email": "brigham@wildeteam.com",
     "discord_id": "1134711010452840480",
-    "url": "https://www.wildeteam.com/"
+    "url": "https://www.wildeteam.com/",
+    "offer": "Win 2 BYU Football tickets",
+    "offer_detail": "Book a free consultation with Brigham and you're entered.",
+    "cta": "Book a free consultation",
+    "image": "https://i0.wp.com/cougconnect.com/wp-content/uploads/2026/11/sponsor-card-ticket-madsen.jpg"
   },
   {
     "name": "Utah Travel Pros",
-    "blurb": "Stress-free vacation planning for Cougar families — Disney, cruises, and more with zero booking fees. Proud sponsor of CougConnect.",
+    "blurb": "Stress-free vacation planning for Cougar families: Disney, Universal, cruises and more with zero booking fees.",
     "email": null,
     "discord_id": "1278205436671033344",
-    "url": "https://utahtravelpros.com/cougconnect/"
+    "url": "https://utahtravelpros.com/cougs",
+    "offer": "Free Universal photo package (up to $138)",
+    "offer_detail": "Book a 4+ night Universal Orlando hotel + ticket package by Dec 31.",
+    "cta": "See the Universal deal",
+    "image": "https://i0.wp.com/cougconnect.com/wp-content/uploads/2026/11/sponsor-card-ticket-utp.jpg"
   },
   {
     "name": "Redhead Repository",
-    "blurb": "Custom hats, shirts, signs and cutting boards — built by fans, for a good cause. Members take 15% off with code CougConnectNIL.",
+    "blurb": "Fan-made gear priced so every Cougar fan can actually buy one.",
     "email": "support@redheadrepository.com",
     "discord_id": "512306454082879493",
-    "url": "https://redheadrepository.com/"
+    "url": "https://redheadrepository.com/",
+    "offer": "15% off custom BYU gear",
+    "offer_detail": "Hats, shirts, signs and cutting boards, built by fans for a good cause.",
+    "code": "CougConnectNIL",
+    "cta": "Shop Redhead Repository",
+    "image": "https://i0.wp.com/cougconnect.com/wp-content/uploads/2026/11/sponsor-card-ticket-redhead.jpg"
   },
   {
     "name": "Western Hearth Distributors",
@@ -29,16 +42,25 @@
   },
   {
     "name": "EverScent",
-    "blurb": "Whole-home scenting that runs through your HVAC vents and covers up to 5,000 sq ft, set from your phone. CougConnect fans get 50% off the Starter Pack, and part of every sale goes to the CougConnect fund for the players.",
+    "blurb": "Whole-home scenting that runs through your HVAC vents and covers up to 5,000 sq ft. No plug-ins, no candles, and you set it from your phone.",
     "email": "mark.morrell@me.com",
     "discord_id": null,
-    "url": "https://everscent.com/cougconnect"
+    "url": "https://everscent.com/cougconnect",
+    "offer": "50% off the EverScent Starter Pack",
+    "offer_detail": "Diffuser + 2 scents. Part of every sale goes to the CougConnect fund for the players.",
+    "cta": "Shop EverScent",
+    "image": "https://i0.wp.com/cougconnect.com/wp-content/uploads/2026/11/sponsor-card-ticket-everscent.jpg"
   },
   {
     "name": "Kava Krave",
-    "blurb": "Citrus berry kava drink mix in grab-and-go stick packs, a non-alcoholic way to wind down (adults 18+). Take 10% off one-time orders with code COUGS.",
+    "blurb": "Citrus berry kava drink mix in grab-and-go stick packs, a non-alcoholic way to wind down (adults 18+).",
     "email": "logan@loganation.com",
     "discord_id": null,
-    "url": "https://kavakrave.com/"
+    "url": "https://kavakrave.com/discount/COUGS",
+    "offer": "10% off Kava Krave",
+    "offer_detail": "On one-time orders. The link below applies the code for you.",
+    "code": "COUGS",
+    "cta": "Shop Kava Krave",
+    "image": "https://i0.wp.com/cougconnect.com/wp-content/uploads/2026/11/sponsor-card-ticket-kava.jpg"
   }
 ]
