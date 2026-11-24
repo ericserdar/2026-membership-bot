@@ -1166,14 +1166,6 @@
     ]
    },
    {
-    "name": "Adam Stewart",
-    "title": "#12 C",
-    "nicknames": [
-     "Adam",
-     "Stewart"
-    ]
-   },
-   {
     "name": "Brooks Bahr",
     "title": "#13 F",
     "nicknames": [
@@ -1205,6 +1197,23 @@
      "Ostojic"
     ]
    }
+  ],
+  "departed": [
+   "AJ Dybantsa",
+   "Adam Stewart",
+   "Dallin Hall",
+   "Egor Demin",
+   "Fousseyni Traore",
+   "Kanon Catchings",
+   "Keba Keita",
+   "Mihailo Bošković",
+   "Mory Bamba",
+   "Richie Saunders",
+   "Sam Merrill",
+   "Trevin Knell",
+   "Trey Stewart",
+   "Xavion Staton",
+   "Xu Xin"
   ]
  }
 }

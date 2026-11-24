@@ -82,13 +82,16 @@ def bb_people() -> dict:
         return " ".join(x for x in (f"#{p['number']}" if p.get("number") not in (None, "") else "", p.get("position") or "") if x)
     players = [entry(p["name"], pos(p), p.get("nicknames")) for p in bb["players"] if p.get("active", True)]
     coaches = [entry(c["name"], c.get("title", ""), c.get("nicknames")) for c in bb["coaches"] if c.get("active", True)]
-    known_p, known_c = {p["name"] for p in players}, {c["name"] for c in coaches}
+    # inactive names count as known so ESPN top-ups can't re-add departed players (e.g. Adam Stewart, Nov 23 2026)
+    known_p = {p["name"] for p in bb["players"]}
+    known_c = {c["name"] for c in bb["coaches"]}
     try:
         players += [entry(n) for n in espn_players("basketball/mens-college-basketball") if n not in known_p]
         coaches += [entry(s["name"], s["title"]) for s in bb_staff() if s["name"] not in known_c]
     except Exception as e:   # the file alone is enough; the web top-up is best-effort
         print(f"basketball web top-up skipped: {e!r}")
-    return {"coaches": coaches, "players": players}
+    return {"coaches": coaches, "players": players,
+            "departed": sorted(p["name"] for p in bb["players"] if not p.get("active", True))}
 
 
 def build() -> dict:

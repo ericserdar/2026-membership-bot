@@ -411,6 +411,7 @@ async def _maybe_refresh_roster():
                 if athletes and "items" in athletes[0]:
                     athletes = [a for group in athletes for a in group["items"]]
                 known = {p["name"] for p in _people.get(sport, {}).get("players", [])}
+                known |= set(_people.get(sport, {}).get("departed", []))   # ESPN can lag: never re-add departed players
                 new = {a["fullName"] for a in athletes if a.get("fullName")} - known
                 if new != _espn_extra[sport]:
                     log.info(f"automod: roster {sport} +{len(new)} from ESPN not in byu_people.json: {sorted(new)[:10]}")
