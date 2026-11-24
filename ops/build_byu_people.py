@@ -8,8 +8,9 @@ criticism, so the classifier needs to know who is actually BYU.
 Sources:
   - Football players + coaches (with nicknames): ~/Claude/CougConnect/rosters/football_2026.json
     (kept current by Tools/scripts/sync_football_roster.py)
-  - Basketball players: ESPN team roster API (team 252)
-  - Basketball staff: byucougars.com men's basketball roster page (staff cards)
+  - Basketball players + coaches (with nicknames, numbers, positions): ~/Claude/CougConnect/rosters/basketball_2026_2027.json
+    (Nov 23 2026; built from ESPN + byucougars.com). ESPN players and byucougars.com staff cards are merged in as a
+    top-up so late adds are still protected.
 
 The bot also refreshes PLAYER names from ESPN once a day at runtime
 (automod._maybe_refresh_roster), so new arrivals are picked up between
@@ -29,6 +30,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "byu_people.json")
 FOOTBALL = os.path.expanduser("~/Claude/CougConnect/rosters/football_2026.json")
+BASKETBALL = os.path.expanduser("~/Claude/CougConnect/rosters/basketball_2026_2027.json")
 ESPN_ROSTER = "https://site.api.espn.com/apis/site/v2/sports/{path}/teams/252/roster"
 BB_ROSTER_PAGE = "https://byucougars.com/sports/mens-basketball/roster"
 # Coaching staff only, not sports medicine / academic / comms rows further down the page.
@@ -74,6 +76,21 @@ def entry(name: str, title: str = "", nicknames=None) -> dict:
     return e
 
 
+def bb_people() -> dict:
+    bb = json.load(open(BASKETBALL))
+    def pos(p):
+        return " ".join(x for x in (f"#{p['number']}" if p.get("number") not in (None, "") else "", p.get("position") or "") if x)
+    players = [entry(p["name"], pos(p), p.get("nicknames")) for p in bb["players"] if p.get("active", True)]
+    coaches = [entry(c["name"], c.get("title", ""), c.get("nicknames")) for c in bb["coaches"] if c.get("active", True)]
+    known_p, known_c = {p["name"] for p in players}, {c["name"] for c in coaches}
+    try:
+        players += [entry(n) for n in espn_players("basketball/mens-college-basketball") if n not in known_p]
+        coaches += [entry(s["name"], s["title"]) for s in bb_staff() if s["name"] not in known_c]
+    except Exception as e:   # the file alone is enough; the web top-up is best-effort
+        print(f"basketball web top-up skipped: {e!r}")
+    return {"coaches": coaches, "players": players}
+
+
 def build() -> dict:
     fb = json.load(open(FOOTBALL))
     fb_players = [entry(p["name"], p.get("position", ""), p.get("nicknames")) for p in fb["players"] if p.get("active", True)]
@@ -86,10 +103,7 @@ def build() -> dict:
             "coaches": [entry(c["name"], c.get("title", ""), c.get("nicknames")) for c in fb["coaches"] if c.get("active", True)],
             "players": fb_players,
         },
-        "basketball": {
-            "coaches": [entry(s["name"], s["title"]) for s in bb_staff()],
-            "players": [entry(n) for n in espn_players("basketball/mens-college-basketball")],
-        },
+        "basketball": bb_people(),
     }
 
 

@@ -1256,7 +1256,7 @@ GAMEDAY_STRIKE_WINDOW_DAYS = float(os.getenv("GAMEDAY_STRIKE_WINDOW_DAYS", "30")
 VENT_SERVER_INVITE = os.getenv("VENT_SERVER_INVITE", "").strip()
 VENT_DM_AFTER_5MIN = int(os.getenv("VENT_DM_AFTER_5MIN", "2"))
 VENT_PUBLIC_MIN = int(os.getenv("VENT_PUBLIC_MIN", "15"))
-VENT_DM = ("Hey, that's your second 5-minute timeout. If you need to let off some steam, there's a separate CougConnect "
+VENT_DM = ("Hey, that's your second 5-minute timeout. If you need to let off some steam, there's a separate, unaffiliated "
            "server with no moderation where you can vent all you want: {link}\n\nCome back here whenever you're ready. 💙")
 VENT_PUBLIC = ("{mention}, sounds like you need to let off some steam. Head over to {link} (no mods over there) "
                "and come back when you're ready. 💙")

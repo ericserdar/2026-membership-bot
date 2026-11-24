@@ -1025,36 +1025,52 @@
     "title": "Head Coach",
     "nicknames": [
      "KY",
-     "Coach Young"
+     "Coach Young",
+     "Kevin"
     ]
+   },
+   {
+    "name": "Tim Fanning",
+    "title": "Associate Head Coach",
+    "nicknames": [
+     "Fanning"
+    ]
+   },
+   {
+    "name": "Brandon Dunson",
+    "title": "Associate Head Coach",
+    "nicknames": [
+     "Dunson"
+    ]
+   },
+   {
+    "name": "Chris Burgess",
+    "title": "Assistant Coach",
+    "nicknames": [
+     "Burgess"
+    ]
+   },
+   {
+    "name": "John Linehan",
+    "title": "Assistant Coach",
+    "nicknames": [
+     "Linehan"
+    ]
+   },
+   {
+    "name": "Patrick Mutombo",
+    "title": "Assistant Coach",
+    "nicknames": [
+     "Coach Mutombo"
+    ]
+   },
+   {
+    "name": "Jordan Brady",
+    "title": "Assistant Coach / Director of Player Development"
    },
    {
     "name": "Doug Stewart",
     "title": "Chief of Staff"
-   },
-   {
-    "name": "Tim Fanning",
-    "title": "Associate Head Coach"
-   },
-   {
-    "name": "Brandon Dunson",
-    "title": "Associate Head Coach"
-   },
-   {
-    "name": "Chris Burgess",
-    "title": "Assistant Coach"
-   },
-   {
-    "name": "John Linehan",
-    "title": "Assistant Coach"
-   },
-   {
-    "name": "Patrick Mutombo",
-    "title": "Assistant Coach"
-   },
-   {
-    "name": "Jordan Brady",
-    "title": "Assistant Coach - Director of Player Development"
    },
    {
     "name": "Justin Young",
@@ -1067,49 +1083,127 @@
   ],
   "players": [
    {
-    "name": "Adam Stewart"
+    "name": "Jaxon Kohler",
+    "title": "#0 F",
+    "nicknames": [
+     "Jaxon",
+     "Kohler"
+    ]
    },
    {
-    "name": "Brody Kozlowski"
+    "name": "Robert Wright III",
+    "title": "#1 G",
+    "nicknames": [
+     "Rob",
+     "Rob Wright",
+     "Robert",
+     "Wright"
+    ]
    },
    {
-    "name": "Brooks Bahr"
+    "name": "Nate Pickens",
+    "title": "#2 G",
+    "nicknames": [
+     "Nate",
+     "Pickens"
+    ]
    },
    {
-    "name": "Bruce Branch III"
+    "name": "Bruce Branch III",
+    "title": "#3 F",
+    "nicknames": [
+     "Bruce",
+     "Branch"
+    ]
    },
    {
-    "name": "Collin Chandler"
+    "name": "Brody Kozlowski",
+    "title": "#4 F",
+    "nicknames": [
+     "Brody",
+     "Koz",
+     "Kozlowski"
+    ]
    },
    {
-    "name": "Dawson Baker"
+    "name": "Collin Chandler",
+    "title": "#5 G",
+    "nicknames": [
+     "Collin",
+     "Chandler"
+    ]
    },
    {
-    "name": "Dean Rueckert"
+    "name": "Khadim Mboup",
+    "title": "#7 F",
+    "nicknames": [
+     "Khadim",
+     "Mboup"
+    ]
    },
    {
-    "name": "Dovydas Buika"
+    "name": "Dean Rueckert",
+    "title": "#8 F",
+    "nicknames": [
+     "Dean",
+     "Rueckert"
+    ]
    },
    {
-    "name": "Jake Wahlin"
+    "name": "Tyler Betsey",
+    "title": "#9 F",
+    "nicknames": [
+     "Tyler",
+     "Betsey"
+    ]
    },
    {
-    "name": "Jaxon Kohler"
+    "name": "Jake Wahlin",
+    "title": "#10 F",
+    "nicknames": [
+     "Jake",
+     "Wahlin"
+    ]
    },
    {
-    "name": "Khadim Mboup"
+    "name": "Adam Stewart",
+    "title": "#12 C",
+    "nicknames": [
+     "Adam",
+     "Stewart"
+    ]
    },
    {
-    "name": "Nate Pickens"
+    "name": "Brooks Bahr",
+    "title": "#13 F",
+    "nicknames": [
+     "Brooks",
+     "Bahr"
+    ]
    },
    {
-    "name": "Petar Ostojic"
+    "name": "Dovydas Buika",
+    "title": "#24 F",
+    "nicknames": [
+     "Dovydas",
+     "Buika"
+    ]
    },
    {
-    "name": "Robert Wright III"
+    "name": "Dawson Baker",
+    "title": "#25 F",
+    "nicknames": [
+     "Dawson",
+     "Baker"
+    ]
    },
    {
-    "name": "Tyler Betsey"
+    "name": "Petar Ostojic",
+    "title": "#33 C",
+    "nicknames": [
+     "Petar",
+     "Ostojic"
+    ]
    }
   ]
  }
