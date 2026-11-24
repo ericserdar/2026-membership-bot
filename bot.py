@@ -1229,6 +1229,29 @@ async def post_admin_log(message: str):
 # is visible to exactly the people who can see #🏈-byufootball / #🏀-byubasketball,
 # and it's added to AutoMod's watch list for as long as it exists.
 
+# Opt-in "🏟️ GAME DAY" section (Eric, Nov 24 2026): game channels open in their own category and only
+# the "Game Day" role (+ Admin/Mod) can see them; members toggle it in Channels & Roles. Off while either
+# id is 0 (old behaviour: placed under the sport channel, same access as it).
+GAMEDAY_ROLE_ID = int(os.getenv("GAMEDAY_ROLE_ID", "0"))
+GAMEDAY_CATEGORY_ID = int(os.getenv("GAMEDAY_CATEGORY_ID", "0"))
+# roles that keep seeing game channels without the Game Day role (Admin, Moderator)
+GAMEDAY_KEEP_VIEW_ROLE_IDS = {int(x) for x in os.getenv(
+    "GAMEDAY_KEEP_VIEW_ROLE_IDS", "1050102845866778734,1189796886073327616").split(",") if x.strip().isdigit()}
+# paid-like roles that may hold Game Day besides the PAID_TIERS roles (Legacy Cougar Insider)
+GAMEDAY_EXTRA_ELIGIBLE_ROLE_IDS = {int(x) for x in os.getenv(
+    "GAMEDAY_EXTRA_ELIGIBLE_ROLE_IDS", "1359536444451983400").split(",") if x.strip().isdigit()}
+VIEW_CHANNEL_BIT = 1 << 10
+
+
+def gameday_section_on() -> bool:
+    return bool(GAMEDAY_ROLE_ID and GAMEDAY_CATEGORY_ID)
+
+
+def _gameday_eligible_role_ids() -> set[int]:
+    return ({ROLE_IDS[t] for t in PAID_TIERS if ROLE_IDS.get(t)} | GAMEDAY_EXTRA_ELIGIBLE_ROLE_IDS
+            | GAMEDAY_KEEP_VIEW_ROLE_IDS)
+
+
 GAMEDAY_REF_CHANNEL_IDS = {
     "football": int(os.getenv("GAMEDAY_REF_FOOTBALL_ID", "1050091238730236055")),      # #🏈-byufootball
     "basketball": int(os.getenv("GAMEDAY_REF_BASKETBALL_ID", "1050104741692178432")),  # #🏀-byubasketball
@@ -1309,7 +1332,7 @@ def _gameday_overwrites(guild: discord.Guild, ref: discord.TextChannel | None) -
     """The reference channel's ROLE overwrites (not one-off member overrides),
     plus the bot itself so it can always post, pin and delete."""
     overwrites = {}
-    if ref:
+    if ref and not gameday_section_on():
         for target, ow in ref.overwrites.items():
             if isinstance(target, discord.Role):
                 overwrites[target] = ow
@@ -1337,11 +1360,33 @@ def _gameday_opener(game: dict) -> str:
     )
 
 
+def _gameday_target_roles(ref_roles: dict) -> dict:
+    """The role overwrites a game channel should have. Section off: the reference channel's, verbatim.
+    Section on: same posting rules, but VIEW is stripped from every role except the bot's own roles,
+    Admin and Moderator, and granted to the Game Day role instead (@everyone stays denied)."""
+    if not gameday_section_on():
+        return ref_roles
+    guild = get_guild()
+    keep = set(GAMEDAY_KEEP_VIEW_ROLE_IDS) | ({r.id for r in guild.me.roles} if guild else set())
+    out = {}
+    for rid, (allow, deny) in ref_roles.items():
+        a, d = int(allow), int(deny)
+        if guild and int(rid) == guild.id:
+            d |= VIEW_CHANNEL_BIT
+        elif int(rid) not in keep:
+            a &= ~VIEW_CHANNEL_BIT
+        if a or d:
+            out[rid] = (str(a), str(d))
+    a, d = (int(x) for x in out.get(str(GAMEDAY_ROLE_ID), ("0", "0")))
+    out[str(GAMEDAY_ROLE_ID)] = (str(a | VIEW_CHANNEL_BIT), str(d & ~VIEW_CHANNEL_BIT))
+    return out
+
+
 async def _gameday_sync_raw_overwrites(channel_id: int, ref_id: int) -> list[str]:
-    """Make channel_id's ROLE overwrites bit-for-bit equal to ref_id's. Returns problems left."""
+    """Make channel_id's ROLE overwrites bit-for-bit equal to _gameday_target_roles(ref_id's). Returns problems left."""
     def roles_of(raw):
         return {o["id"]: (str(o["allow"]), str(o["deny"])) for o in raw["permission_overwrites"] if o["type"] == 0}
-    want = roles_of(await bot.http.get_channel(ref_id))
+    want = _gameday_target_roles(roles_of(await bot.http.get_channel(ref_id)))
     got = roles_of(await bot.http.get_channel(channel_id))
     for rid, (allow, deny) in want.items():
         if got.get(rid) != (allow, deny):
@@ -1370,6 +1415,12 @@ async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextC
     name = gameday.channel_name(game)
     ref = guild.get_channel(GAMEDAY_REF_CHANNEL_IDS.get(game["sport"], 0))
     category = ref.category if ref else None
+    if gameday_section_on():
+        category = guild.get_channel(GAMEDAY_CATEGORY_ID)
+        if not isinstance(category, discord.CategoryChannel) or not guild.get_role(GAMEDAY_ROLE_ID):
+            await gameday_alert(akey, f"`#{name}` NOT created: the Game Day category `{GAMEDAY_CATEGORY_ID}` or role "
+                                f"`{GAMEDAY_ROLE_ID}` is missing.")
+            return None
     if not ref or not category:
         # Without the reference channel we can't copy its access rules; refuse
         # rather than guess who should see a paid-members channel.
@@ -1392,7 +1443,7 @@ async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextC
         return None
 
     try:
-        extra = {"position": ref.position + 1} if ref else {}
+        extra = {"position": ref.position + 1} if ref and not gameday_section_on() else {}
         channel = await guild.create_text_channel(
             name=name,
             category=category,
@@ -1439,7 +1490,9 @@ async def open_gameday_channel(game: dict, force: bool = False) -> discord.TextC
         try:
             await ref.send(
                 f"{gameday.EMOJI.get(game['sport'], '')} Game-day chat for **{gameday.matchup(game)}** "
-                f"is open: {channel.mention}",
+                f"is open: {channel.mention}"
+                + ("\n-# Don't see it? Server name → **Channels & Roles** → turn on **Game-day channels**."
+                   if gameday_section_on() else ""),
                 silent=True, allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception as e:
@@ -1470,7 +1523,7 @@ async def _gameday_announce(channel: discord.TextChannel, game: dict):
         return
     emoji = gameday.EMOJI.get(game["sport"], "")
     tv = f" · 📺 {game['tv']}" if game.get("tv") else ""
-    optin = (f"\n-# Want only game-day pings? Pick **Game day chats** in [Channels & Roles]({ping_roles_link()})."
+    optin = (f"\n-# Want only game-day pings? Pick **Game-day pings** in [Channels & Roles]({ping_roles_link()})."
              if GAMEDAY_ANNOUNCE_EVERYONE and role_id else "")
     try:
         await ann.send(
@@ -1866,8 +1919,9 @@ def _welcome_dm_parts(tier: str, apartment_slug: str | None = None) -> tuple[str
     start.add_field(
         name="🏈 Game days & Pick'em",
         value=f"A **BYU vs [opponent]** channel opens {gameday.hours_text(gameday.OPEN_HOURS_BEFORE)} before every "
-              f"football and basketball game and closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after it ends · "
-              f"Pick'em runs in {ob_chan_md('pickem')}.",
+              f"football and basketball game and closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after it ends"
+              + (" (turn **Game-day channels** off or on in Channels & Roles)" if gameday_section_on() else "")
+              + f" · Pick'em runs in {ob_chan_md('pickem')}.",
         inline=False,
     )
     start.add_field(
@@ -1897,7 +1951,9 @@ def _checkin_dm_text(days: int, tier: str) -> str:
             "👋 **One week in — here's how to get the most out of CougConnect:**\n"
             f"🔔 Pick your pings in [Channels & Roles]({ping_roles_link()}) — VC & AMA · Pick'em.\n"
             f"🏈 Game days: a **BYU vs [opponent]** channel opens before every football and basketball game "
-            f"and closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after it ends. Pick'em is in {ob_chan_md('pickem')}.\n"
+            f"and closes {gameday.hours_text(gameday.CLOSE_HOURS_AFTER)} after it ends"
+            + (" (don't want them? turn off **Game-day channels** in Channels & Roles)" if gameday_section_on() else "")
+            + f". Pick'em is in {ob_chan_md('pickem')}.\n"
             f"📰 {ob_chan_md('news')} pulls every BYU story into one feed; voice-chat recaps land on the site.\n"
             f"▶️ The daily podcast is on YouTube — [subscribe]({ob_url('youtube')}) so episodes hit your feed.\n"
             f"🛍️ Gear: player tees (Kyler Kasper, Royal Nights, more) in [the shop]({ob_url('shop')})."
@@ -2000,10 +2056,31 @@ async def assign_role(discord_id: int, tier: str) -> bool:
         log.warning(f"Role ID not configured for tier '{tier}'")
         return False
 
+    eligible = _gameday_eligible_role_ids()
+    was_eligible = any(r.id in eligible for r in member.roles)
     if roles_to_remove:
         await member.remove_roles(*roles_to_remove, reason="CougConnect sync")
     await member.add_roles(new_role, reason=f"CougConnect tier: {tier}")
+    await _gameday_role_follow_tier(member, tier, was_eligible)
     return True
+
+
+async def _gameday_role_follow_tier(member: discord.Member, tier: str, was_eligible: bool):
+    """Game Day role: given once when someone BECOMES paid (so a re-sync never re-adds it for a member who
+    turned it off); taken away when they drop to a non-paid tier. Never fatal."""
+    if not GAMEDAY_ROLE_ID:
+        return
+    role = member.guild.get_role(GAMEDAY_ROLE_ID)
+    if not role:
+        return
+    try:
+        if tier in PAID_TIERS and not was_eligible and role not in member.roles:
+            await member.add_roles(role, reason="Game Day chats on by default for new paid members")
+        elif tier not in PAID_TIERS and role in member.roles and not any(
+                r.id in (GAMEDAY_EXTRA_ELIGIBLE_ROLE_IDS | GAMEDAY_KEEP_VIEW_ROLE_IDS) for r in member.roles):
+            await member.remove_roles(role, reason=f"Game Day chats are for paid members (now {tier})")
+    except Exception as e:
+        log.error(f"gameday role follow-tier failed for {member.id}: {e}")
 
 
 def _resolve_apartment_role(guild: discord.Guild, cfg: dict) -> discord.Role | None:
@@ -3495,6 +3572,23 @@ class JerseyFormView(discord.ui.View):
             await interaction.response.send_message(f"Pick {' and '.join(missing)} from the menus first.", ephemeral=True)
             return
         await interaction.response.send_modal(JerseyDetailsModal(form))
+
+
+@bot.listen("on_member_update")
+async def _gameday_role_guard(before: discord.Member, after: discord.Member):
+    """Channels & Roles lets anyone tick "Game day chats". Only paid members keep it: if the role was JUST
+    added and the member holds no paid/eligible role, take it back (the channels are paid-only)."""
+    if not GAMEDAY_ROLE_ID or after.bot:
+        return
+    if any(r.id == GAMEDAY_ROLE_ID for r in before.roles) or not any(r.id == GAMEDAY_ROLE_ID for r in after.roles):
+        return
+    if any(r.id in _gameday_eligible_role_ids() for r in after.roles):
+        return
+    try:
+        await after.remove_roles(discord.Object(GAMEDAY_ROLE_ID), reason="Game Day chats are for paid members")
+        log.info(f"gameday: removed self-assigned Game Day role from unpaid member {after.id}")
+    except Exception as e:
+        log.error(f"gameday role guard failed for {after.id}: {e}")
 
 
 @bot.event

@@ -1,0 +1,228 @@
+{
+ "guild_id": "1050090756649537616",
+ "prompts": [
+  {
+   "id": "1540549458616655964",
+   "title": "What do you want to get pinged for?",
+   "options": [
+    {
+     "id": "1540549458616655968",
+     "title": "Pick'em Pings",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [
+      "1540506843443372083"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1540549458616655969",
+     "title": "VC & AMA Pings",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [
+      "1540506845150584852"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1568064733666484259",
+     "title": "Game day chats",
+     "description": "A ping when each football and basketball game-day channel opens",
+     "emoji": {
+      "id": null,
+      "name": "\ud83c\udfdf\ufe0f",
+      "animated": false
+     },
+     "role_ids": [
+      "1568064732479627304"
+     ],
+     "channel_ids": []
+    }
+   ],
+   "single_select": false,
+   "required": false,
+   "in_onboarding": true,
+   "type": 0
+  },
+  {
+   "id": "1540549458616655970",
+   "title": "What do you want to follow?",
+   "options": [
+    {
+     "id": "1540549458729640007",
+     "title": "BYU Football",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1395637847041511506"
+     ]
+    },
+    {
+     "id": "1540549458729640008",
+     "title": "BYU Basketball",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1395638029737132103"
+     ]
+    },
+    {
+     "id": "1540549458729640009",
+     "title": "Other BYU & college sports",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1486949889194856588"
+     ]
+    },
+    {
+     "id": "1540549458729640010",
+     "title": " Pro sports",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1395638347120115724"
+     ]
+    },
+    {
+     "id": "1540549458729640011",
+     "title": "Off-topic hangouts",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1395637631240638474"
+     ]
+    }
+   ],
+   "single_select": false,
+   "required": false,
+   "in_onboarding": true,
+   "type": 0
+  },
+  {
+   "id": "1563596571663143008",
+   "title": "Are you in a CougConnect chapter?",
+   "options": [
+    {
+     "id": "1563596571663143011",
+     "title": "Idaho",
+     "description": "Local chapter chat + meetup pings",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [
+      "1563596498430722228"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1563596571818590279",
+     "title": "Arizona",
+     "description": "Local chapter chat + meetup pings",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [
+      "1563596502453063762"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1563596571818590280",
+     "title": "DFW",
+     "description": "Local chapter chat + meetup pings",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [
+      "1563596506458624090"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1563596571818590281",
+     "title": "SoCal",
+     "description": "Local chapter chat + meetup pings",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [
+      "1563596510552129716"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1563596571818590282",
+     "title": "Iowa",
+     "description": "Local chapter chat + meetup pings",
+     "emoji": {
+      "id": null,
+      "name": null,
+      "animated": false
+     },
+     "role_ids": [
+      "1563596514469875862"
+     ],
+     "channel_ids": []
+    }
+   ],
+   "single_select": true,
+   "required": false,
+   "in_onboarding": true,
+   "type": 0
+  }
+ ],
+ "default_channel_ids": [
+  "1455071316850769961",
+  "1189372646970884188",
+  "1360127337554772150"
+ ],
+ "enabled": true,
+ "mode": 0,
+ "below_requirements": false,
+ "responses": [],
+ "onboarding_prompts_seen": {},
+ "onboarding_responses_seen": {}
+}
